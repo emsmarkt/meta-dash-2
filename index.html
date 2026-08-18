@@ -371,23 +371,26 @@ html,body{background:#fbfcfd!important}
 <script>
 (function() {
   'use strict';
-  /* ===== ISOLAMENTO POR INSTANCIA (multi-dash no mesmo dominio) =====
-     No GitHub Pages varios repos ficam no MESMO dominio (emsmarkt.github.io/meta-dash, /meta-dash-2...), e o
-     localStorage e por DOMINIO — sem isso, os dashes compartilhariam/sobrescreveriam tokens. Aqui cada LINK
-     (path) ganha seu proprio namespace de localStorage (tokens/config separados). A PRIMEIRA instancia a abrir
-     "reivindica" as chaves antigas (sem prefixo) p/ o seu namespace — assim o dash ATUAL nao perde o token;
-     os dashes seguintes comecam limpos e voce cola outros tokens. */
+  /* ===== INSTANCIA / DASH PRINCIPAL vs ISOLADO =====
+     No GitHub Pages os repos ficam no MESMO dominio (emsmarkt.github.io/meta-dash, /meta-dash-2...). O dash 1
+     (PRIMARY_DASH_SLUG) e o PRINCIPAL — fala com o robo. Qualquer OUTRO path roda ISOLADO. */
+  var PRIMARY_DASH_SLUG = 'meta-dash'; /* <-- path/repo do dash 1. Se mudar, ajuste aqui. */
+  var DASH_SLUG = (function(){ try { var seg = (location.pathname || '/').replace(/\/(index\.html)?$/, '').split('/').filter(Boolean); return seg.length ? seg[seg.length - 1] : 'root'; } catch(e){ return 'root'; } })();
+  var IS_PRIMARY = (DASH_SLUG === PRIMARY_DASH_SLUG || DASH_SLUG === 'root' || DASH_SLUG === 'dash');
+  var ISOLATED = !IS_PRIMARY;
+  /* ===== ISOLAMENTO DO localStorage por instancia (v2) =====
+     Cada link (path) tem seu proprio namespace (@2:<slug>::). SO o dash PRINCIPAL migra as chaves antigas
+     (sem prefixo) p/ o seu namespace — o dash 2 (isolado) NUNCA puxa nada, comeca limpo. (v2 abandona um
+     namespace antigo que ficou poluido quando o dash 2 puxou por engano os tokens do dash 1.) */
   (function(){
     try {
-      var seg = (location.pathname || '/').replace(/\/(index\.html)?$/, '').split('/').filter(Boolean);
-      var slug = seg.length ? seg[seg.length - 1] : 'root';
-      var PFX = '@' + slug + '::';
+      var PFX = '@2:' + DASH_SLUG + '::';
       var g = localStorage.getItem.bind(localStorage), s = localStorage.setItem.bind(localStorage), r = localStorage.removeItem.bind(localStorage);
-      if (!g('@@ns_claimed')) {
+      if (IS_PRIMARY && !g('@@nsclaimed2')) {
         var legacy = [];
         for (var i = 0; i < localStorage.length; i++) { var k = localStorage.key(i); if (k && k.indexOf('@') !== 0) legacy.push(k); }
         legacy.forEach(function(k){ if (g(PFX + k) == null) s(PFX + k, g(k)); });
-        s('@@ns_claimed', slug);
+        s('@@nsclaimed2', DASH_SLUG);
       }
       localStorage.getItem = function(k){ return g(PFX + k); };
       localStorage.setItem = function(k, v){ return s(PFX + k, v); };
@@ -498,14 +501,8 @@ html,body{background:#fbfcfd!important}
   /* URL do Worker (Cloudflare) FIXA no codigo — igual p/ todos que acessam (nao pede a cada um).
      Se mudar o worker, troque so esta linha. (localStorage 'wk_url' ainda sobrescreve, se existir.) */
   var WK_URL_DEFAULT = 'https://meta-robo.emersondomarketing.workers.dev';
-  /* ===== INSTANCIA / ISOLAMENTO DO ROBO =====
-     Dash 1 (PRIMARY) fala com o robo (interruptor LIVE/DRY, historico do robo, /applied). Qualquer OUTRO link
-     (path diferente) roda ISOLADO: NAO fala com o worker -> sem Telegram, sem regras automatizadas, sem
-     historico do robo, e as acoes manuais dele NAO aparecem no dash 1. Historico so LOCAL (deste dash). */
-  var PRIMARY_DASH_SLUG = 'meta-dash'; /* <-- path/repo do dash 1. Se mudar, ajuste aqui. */
-  var DASH_SLUG = (function(){ try { var seg = (location.pathname || '/').replace(/\/(index\.html)?$/, '').split('/').filter(Boolean); return seg.length ? seg[seg.length - 1] : 'root'; } catch(e){ return 'root'; } })();
-  var ISOLATED = !(DASH_SLUG === PRIMARY_DASH_SLUG || DASH_SLUG === 'root' || DASH_SLUG === 'dash');
-  /* ISOLADO -> getWkUrl() devolve '' -> todas as chamadas ao worker (guardadas por `if(u)`) sao puladas. */
+  /* ISOLADO (dash 2+) -> getWkUrl() devolve '' -> nenhuma chamada ao worker (todas guardadas por `if(u)`):
+     sem Telegram, sem regras, sem historico do robo, e as acoes manuais NAO vao pro /applied do dash 1. */
   function getWkUrl() { if (ISOLATED) return ''; try { var v = (localStorage.getItem('wk_url') || '').trim(); return (v || WK_URL_DEFAULT).replace(/\/+$/,''); } catch(e) { return WK_URL_DEFAULT; } }
   /* TOAST no canto sup. direito. kind 'err' = vermelho (erro, some em 20s) | 'ok' = verde (sucesso, 8s).
      Fecha no x tambem. NAO manda pro Telegram (removido a pedido do usuario 11/07). */
