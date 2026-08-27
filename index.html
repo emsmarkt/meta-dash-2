@@ -1401,7 +1401,7 @@ html,body{background:#fbfcfd!important}
               /* Inclui CBO + TESTE (p/ os filtros da aba). ABO tem aba propria. Exige orcamento no nivel da CAMPANHA
                  — vitalicio OU diario. As de orcamento DIARIO entram so p/ VISUALIZAR (sem regra; o worker tbm as
                  ignora, pois exige lifetime_budget). */
-              return !!c.name && (nu.indexOf('CBO') >= 0 || nu.indexOf('TESTE') >= 0) && nu.indexOf('SUBSTITUIDA') < 0 && (!!c.lifetime_budget || !!c.daily_budget);
+              return !!c.name && (nu.indexOf('CBO') >= 0 || nu.indexOf('TESTE') >= 0) && nu.indexOf('SUBSTITUIDA') < 0 && nu.indexOf('MORTA') < 0 && (!!c.lifetime_budget || !!c.daily_budget);
             }).forEach(function(c) {
               c._accountName = acc.name; c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; c._acctOffset = acc.timezone_offset_hours_utc; camps.push(c);
             });
@@ -1619,7 +1619,7 @@ html,body{background:#fbfcfd!important}
               var es = (c.effective_status || c.status || '').toUpperCase();
               if (es === 'DELETED' || es === 'ARCHIVED') return false;
               var nu = (c.name || '').toUpperCase();
-              return !!c.name && nu.indexOf('ABO') >= 0 && nu.indexOf('SUBSTITUIDA') < 0;
+              return !!c.name && nu.indexOf('ABO') >= 0 && nu.indexOf('SUBSTITUIDA') < 0 && nu.indexOf('MORTA') < 0;
             }).forEach(function(c) {
               c._accountName = acc.name; c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; camps.push(c);
             });
@@ -2400,11 +2400,9 @@ html,body{background:#fbfcfd!important}
     var hasC = hasConv();
     var isToday = (cboPeriod === 'today');
     var dayMoodObj = isToday ? computeDayMood() : null;
+    /* Barra de diagnostico do RedTrack/Humor OCULTA (a pedido) — fica sempre escondida. */
     var diagEl = document.getElementById('rtDiag');
-    if (diagEl) {
-      if (getRtTk() && rtDiag) { diagEl.style.display = 'block'; diagEl.textContent = rtDiag; }
-      else { diagEl.style.display = 'none'; }
-    }
+    if (diagEl) diagEl.style.display = 'none';
     if (!cboData.length) { document.getElementById('cboTbody').innerHTML = '<tr><td colspan="26" class="ld">Nenhuma campanha CBO encontrada.</td></tr>'; return; }
     sortCBO();
     var arrow = cboSort.dir === 'asc' ? ' &#9650;' : ' &#9660;';
@@ -2639,14 +2637,7 @@ html,body{background:#fbfcfd!important}
       }
     });
     bindSaleTips();
-    /* Humor do dia na faixa de diagnostico */
-    var diag2 = document.getElementById('rtDiag');
-    if (diag2 && isToday && dayMoodObj) {
-      var moodTxt = { good:'BOM', normal:'NORMAL', bad:'RUIM' }[dayMoodObj.mood];
-      var moodLine = 'Humor do dia: ' + moodTxt + ' (ROAS combinado ' + dayMoodObj.roas.toFixed(2).replace('.',',') + ')';
-      diag2.style.display = 'block';
-      diag2.textContent = (rtDiag ? rtDiag + '  |  ' : '') + moodLine;
-    }
+    /* (Barra de diagnostico do RedTrack/Humor removida da tela a pedido.) */
     applyCboFilters();
   }
 
