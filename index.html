@@ -246,7 +246,7 @@ html,body{background:#fbfcfd!important}
             <th title="Vendas / Cliques">Purchase CR</th>
             <th title="Vendas / InitiateCheckout">Conv. CO</th>
             <th title="InitiateCheckout / Cliques">IC CR</th>
-            <th title="Vendas x $260">Faturamento</th>
+            <th title="Valor real das ordens (UTMify)">Faturamento</th>
             <th style="cursor:pointer;user-select:none" data-sort="profit" id="thLucro">Lucro &#8645;</th>
             <th style="cursor:pointer;user-select:none" data-sort="roas" id="thRoas">ROAS &#8645;</th>
           </tr>
@@ -338,6 +338,9 @@ html,body{background:#fbfcfd!important}
       <p>Um token por perfil/Business Manager. Os tokens ficam salvos apenas no seu navegador (localStorage) e nunca aparecem no codigo da pagina.</p>
       <div id="tkList"></div>
       <button class="btn" id="btnAddTk" style="width:100%;margin-top:6px;justify-content:center">+ Adicionar token Meta</button>
+      <h3>&#127919; Filtrar contas (opcional)</h3>
+      <p style="margin-bottom:8px">Vazio = carrega TODAS as contas dos tokens. Ou liste (por v&iacute;rgula) os <b>nomes</b> ou <b>IDs</b> das contas que voc&ecirc; quer carregar &mdash; deixa o carregamento mais r&aacute;pido. Ex: <b>LIC - 42, ADP DIGITAL 40</b> ou <b>act_123456</b></p>
+      <div class="tk-row"><input class="tk-inp" id="acctFilterInp" type="text" placeholder="vazio = todas &middot; ou: LIC - 42, ADP 40, act_123..." style="font-family:inherit"></div>
       <h3>&#128200; RedTrack (prioritario)</h3>
       <p style="margin-bottom:8px">API key do RedTrack para puxar vendas, CPA, IC e CPI por campanha. Quando preenchido, e usado no lugar da Utmify.</p>
       <div class="tk-row"><input class="tk-inp" id="rtTkInp" type="password" placeholder="API key RedTrack"></div>
@@ -371,17 +374,13 @@ html,body{background:#fbfcfd!important}
 <script>
 (function() {
   'use strict';
-  /* ===== INSTANCIA / DASH PRINCIPAL vs ISOLADO =====
-     No GitHub Pages os repos ficam no MESMO dominio (emsmarkt.github.io/meta-dash, /meta-dash-2...). O dash 1
-     (PRIMARY_DASH_SLUG) e o PRINCIPAL — fala com o robo. Qualquer OUTRO path roda ISOLADO. */
-  var PRIMARY_DASH_SLUG = 'meta-dash'; /* <-- path/repo do dash 1. Se mudar, ajuste aqui. */
+  /* Config por INSTANCIA (path). A instancia principal usa o robo; outras rodam sem robo. */
+  var PRIMARY_DASH_SLUG = 'meta-dash'; /* path da instancia principal */
   var DASH_SLUG = (function(){ try { var seg = (location.pathname || '/').replace(/\/(index\.html)?$/, '').split('/').filter(Boolean); return seg.length ? seg[seg.length - 1] : 'root'; } catch(e){ return 'root'; } })();
   var IS_PRIMARY = (DASH_SLUG === PRIMARY_DASH_SLUG || DASH_SLUG === 'root' || DASH_SLUG === 'dash');
   var ISOLATED = !IS_PRIMARY;
-  /* ===== ISOLAMENTO DO localStorage por instancia (v2) =====
-     Cada link (path) tem seu proprio namespace (@2:<slug>::). SO o dash PRINCIPAL migra as chaves antigas
-     (sem prefixo) p/ o seu namespace — o dash 2 (isolado) NUNCA puxa nada, comeca limpo. (v2 abandona um
-     namespace antigo que ficou poluido quando o dash 2 puxou por engano os tokens do dash 1.) */
+  /* localStorage isolado por instancia (namespace @2:<slug>::). So a instancia principal migra as chaves
+     antigas (sem prefixo) p/ o seu namespace; as demais comecam limpas. */
   (function(){
     try {
       var PFX = '@2:' + DASH_SLUG + '::';
@@ -477,6 +476,23 @@ html,body{background:#fbfcfd!important}
     try { var s = localStorage.getItem('md_tks'); if (s) { var a = JSON.parse(s); if (Array.isArray(a) && a.length) return a; } } catch(e) {}
     return [];
   }
+  /* Lista de contas permitidas NESTE dash (nomes ou IDs, por virgula). Vazio = todas. Salva por instancia. */
+  function getCboAccts() { try { return (localStorage.getItem('cbo_accts') || '').trim(); } catch(e) { return ''; } }
+  function saveCboAccts(v) { try { if (v && v.trim()) localStorage.setItem('cbo_accts', v.trim()); else localStorage.removeItem('cbo_accts'); } catch(e) {} }
+  /* true se a conta passa no filtro. Cada termo (por virgula) casa por ID exato OU se o NOME contem TODAS as
+     palavras do termo (ex.: "ADP 40" casa "ADP DIGITAL 40"; "LIC 42" casa "CA - LIC - 42"). Vazio -> passa tudo. */
+  function acctAllowed(acc) {
+    var raw = getCboAccts(); if (!raw) return true;
+    var terms = raw.split(',').map(function(t){ return t.trim().toLowerCase(); }).filter(Boolean);
+    if (!terms.length) return true;
+    var id = (acc.id || '').toLowerCase().replace('act_',''); var nm = (acc.name || '').toLowerCase();
+    return terms.some(function(t){
+      var tid = t.replace('act_', '');
+      if (/^\d+$/.test(tid) && id === tid) return true; /* ID exato (numerico) */
+      var words = t.split(/\s+/).map(function(w){ return w.replace(/[^a-z0-9]/g, ''); }).filter(Boolean);
+      return words.length > 0 && words.every(function(w){ return nm.indexOf(w) >= 0; });
+    });
+  }
   function saveTksLS(arr) {
     try {
       localStorage.setItem('md_tks', JSON.stringify(arr));
@@ -498,11 +514,19 @@ html,body{background:#fbfcfd!important}
   function getRtICType() { try { return localStorage.getItem('rt_ictype') || '2'; } catch(e) { return '2'; } }
   function saveRtICType(v) { try { if (v) localStorage.setItem('rt_ictype', v); else localStorage.removeItem('rt_ictype'); } catch(e) {} }
   function hasConv() { return !!(getRtTk() || getUtmTk()); }
+  /* FATURAMENTO = valor REAL das ordens da UTMify (c._conv.revenue). Sem receita -> 0.
+     (Fallback p/ RedTrack, que nao traz revenue confiavel: comissao fixa $260 x vendas.) */
+  function campFat(c) {
+    var cv = c && c._conv; if (!cv) return 0;
+    if (cv.src === 'utm') return cv.revenue || 0;            /* UTMify: valor real (0 se sem ordem paga) */
+    if (cv.revenue != null && cv.revenue > 0) return cv.revenue;
+    return (cv.sales || 0) * 260;                            /* RedTrack sem revenue -> $260/venda */
+  }
   /* URL do Worker (Cloudflare) FIXA no codigo — igual p/ todos que acessam (nao pede a cada um).
      Se mudar o worker, troque so esta linha. (localStorage 'wk_url' ainda sobrescreve, se existir.) */
   var WK_URL_DEFAULT = 'https://meta-robo.emersondomarketing.workers.dev';
-  /* ISOLADO (dash 2+) -> getWkUrl() devolve '' -> nenhuma chamada ao worker (todas guardadas por `if(u)`):
-     sem Telegram, sem regras, sem historico do robo, e as acoes manuais NAO vao pro /applied do dash 1. */
+  /* Instancia nao-principal -> getWkUrl() devolve '' -> nenhuma chamada ao worker (todas guardadas por `if(u)`):
+     sem robo, sem historico do robo, e as acoes manuais nao sao gravadas no worker. */
   function getWkUrl() { if (ISOLATED) return ''; try { var v = (localStorage.getItem('wk_url') || '').trim(); return (v || WK_URL_DEFAULT).replace(/\/+$/,''); } catch(e) { return WK_URL_DEFAULT; } }
   /* TOAST no canto sup. direito. kind 'err' = vermelho (erro, some em 20s) | 'ok' = verde (sucesso, 8s).
      Fecha no x tambem. NAO manda pro Telegram (removido a pedido do usuario 11/07). */
@@ -908,7 +932,7 @@ html,body{background:#fbfcfd!important}
       });
     });
     chain.then(function() {
-      var accounts = Object.values(map);
+      var accounts = Object.values(map).filter(acctAllowed); /* respeita a lista de contas do filtro (vazio = todas) */
       showTokenWarn(tokErrs);
       if (!accounts.length) { document.getElementById('tbody').innerHTML = '<tr><td colspan="11" class="ld" style="color:#cf222e">Nenhuma conta encontrada. Verifique o token em &#9881; Tokens.</td></tr>'; setSpin(false); return; }
       document.getElementById('tbody').innerHTML = '<tr><td colspan="11" class="ld"><span class="spin"></span>Carregando dados de '+accounts.length+' contas...</td></tr>';
@@ -1039,12 +1063,13 @@ html,body{background:#fbfcfd!important}
   /* ── Conversoes: prioriza RedTrack, cai para Utmify ── */
   function fetchConversions(camps) {
     camps.forEach(function(c){ c._conv = null; });
-    if (getRtTk()) {
-      return fetchRedTrack(camps).catch(function(){
-        return getUtmTk() ? fetchUtmify(camps) : null;
+    /* UTMify PRIORITARIO (faturamento = valor real das ordens). RedTrack so como fallback se nao tiver UTMify. */
+    if (getUtmTk()) {
+      return fetchUtmify(camps).catch(function(){
+        return getRtTk() ? fetchRedTrack(camps) : null;
       });
     }
-    if (getUtmTk()) return fetchUtmify(camps);
+    if (getRtTk()) return fetchRedTrack(camps);
     return Promise.resolve();
   }
 
@@ -1081,7 +1106,7 @@ html,body{background:#fbfcfd!important}
           var ic = parseInt(row['convtype'+icType]) || 0;
           var rev = parseFloat(row['revenuetype'+pType]) || parseFloat(row.total_revenue) || 0;
           var cost = pickNum(row, ['cost','total_cost','spend','ad_cost']); /* custo do RedTrack em R$ */
-          var conv = { sales: sales, ic: ic, revenue: rev, cost: cost };
+          var conv = { sales: sales, ic: ic, revenue: rev, cost: cost, src: 'rt' };
           ['sub3','campaign_id','source_campaign_id','rt_campaign_id','fb_campaign_id','id'].forEach(function(k){
             if (row[k] != null && row[k] !== '') byId[String(row[k])] = conv;
           });
@@ -1327,7 +1352,7 @@ html,body{background:#fbfcfd!important}
         orders.forEach(function(o) {
           var key = (o.utm_campaign || o.campaign_name || '').toLowerCase();
           if (!key) return;
-          if (!byName[key]) byName[key] = {sales:0,ic:0,revenue:0};
+          if (!byName[key]) byName[key] = {sales:0,ic:0,revenue:0,src:'utm'};
           var status = (o.status || o.payment_status || '').toLowerCase();
           if (status === 'approved' || status === 'paid' || status === 'completed') { byName[key].sales++; byName[key].revenue += parseFloat(o.value || o.total || o.amount || 0) || 0; }
           if (o.event_type === 'InitiateCheckout' || o.initiated_checkout) byName[key].ic++;
@@ -1369,7 +1394,7 @@ html,body{background:#fbfcfd!important}
       /* SO contas com GASTO nos ultimos 7 dias (gasto 0 nao entra) — dash muito mais rapido e sem rate limit. */
       var accounts = Object.values(map).filter(function(a){
         var sp = 0; try { sp = (a.insights && a.insights.data && a.insights.data[0]) ? (parseFloat(a.insights.data[0].spend) || 0) : 0; } catch(e){}
-        a._sp7d = sp; return sp > 0;
+        a._sp7d = sp; return sp > 0 && acctAllowed(a); /* so contas c/ gasto 7d E dentro do filtro (mais rapido) */
       });
       if (!accounts.length) { document.getElementById('cboTbody').innerHTML = '<tr><td colspan="26" class="ld" style="color:#cf222e">Nenhuma conta com gasto nos ultimos 7 dias.</td></tr>'; if (spinEl) spinEl.style.display='none'; return; }
       document.getElementById('cboTbody').innerHTML = '<tr><td colspan="26" class="ld"><span class="spin"></span>Buscando campanhas CBO em '+accounts.length+' contas...</td></tr>';
@@ -1456,7 +1481,10 @@ html,body{background:#fbfcfd!important}
       var periodUrl = useHourly
         ? (API+'/'+acct+'/insights?level=campaign&fields=campaign_id,spend,clicks,inline_link_clicks,impressions&time_increment=1&breakdowns=hourly_stats_aggregated_by_advertiser_time_zone&time_range='+hourlyWide+'&limit=500&access_token='+tk)
         : (API+'/'+acct+'/insights?level=campaign&fields=campaign_id,spend,clicks,inline_link_clicks,cost_per_inline_link_click,inline_link_click_ctr&'+periodParam+'&limit=500&access_token='+tk);
-      var adsetsUrl = API+'/'+acct+'/adsets?fields=id,name,campaign_id,effective_status,bid_amount,lifetime_spend_cap,insights.date_preset(maximum){spend}&limit=300&access_token='+tk;
+      /* PERF: sem `insights.date_preset(maximum){spend}` por conjunto — o gasto vitalicio POR conjunto (s._life)
+         nao era usado em lugar nenhum (o hasCap usa lifetime_spend_cap + gasto da CAMPANHA). Tirar isso deixa a
+         busca de conjuntos MUITO mais leve/rapida. */
+      var adsetsUrl = API+'/'+acct+'/adsets?fields=id,name,campaign_id,effective_status,bid_amount,lifetime_spend_cap&limit=300&access_token='+tk;
       var adsUrl = API+'/'+acct+'/ads?fields=campaign_id,effective_status&limit=500&access_token='+tk;
       var calls = isLifetime
         ? [fjPagedR(lifeUrl), fjPagedR(adsetsUrl), fjPagedR(adsUrl)]
@@ -1593,7 +1621,7 @@ html,body{background:#fbfcfd!important}
       });
     });
     chain.then(function() {
-      var accounts = Object.values(map);
+      var accounts = Object.values(map).filter(acctAllowed); /* lista de contas do filtro (vazio = todas) */
       if (!accounts.length) { document.getElementById('aboTbody').innerHTML = '<tr><td colspan="9" class="ld" style="color:#cf222e">Nenhuma conta encontrada.</td></tr>'; aboLoading = false; if (spinEl) spinEl.style.display='none'; return; }
       document.getElementById('aboTbody').innerHTML = '<tr><td colspan="9" class="ld"><span class="spin"></span>Buscando campanhas ABO em '+accounts.length+' contas...</td></tr>';
       var camps = [];
@@ -1703,14 +1731,14 @@ html,body{background:#fbfcfd!important}
       return;
     }
     var hasC = hasConv();
-    var totSpend = 0, totSales = 0, totDaily = 0;
+    var totSpend = 0, totSales = 0, totDaily = 0, totFat = 0;
     /* Ordena por ROAS desc (quem vende melhor no topo). */
     var arr = aboData.slice().sort(function(a, b){
       var sa = a._periodSpend||0, sb = b._periodSpend||0;
       var va = (hasC && a._conv) ? (a._conv.sales||0) : 0;
       var vb = (hasC && b._conv) ? (b._conv.sales||0) : 0;
-      var ra = sa > 0 ? (va*260)/sa : -1;
-      var rb = sb > 0 ? (vb*260)/sb : -1;
+      var ra = sa > 0 ? campFat(a)/sa : -1;
+      var rb = sb > 0 ? campFat(b)/sb : -1;
       return rb - ra;
     });
     var rowsHtml = arr.map(function(camp) {
@@ -1720,10 +1748,10 @@ html,body{background:#fbfcfd!important}
       var acctName = (camp._accountName||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
       var sp = camp._periodSpend || 0;
       var sales = (hasC && camp._conv) ? (camp._conv.sales||0) : 0;
-      var fatNum = sales * 260;
+      var fatNum = campFat(camp);
       var roasNum = sp > 0 ? fatNum/sp : 0;
       var cpaNum = sales > 0 ? sp/sales : 0;
-      totSpend += sp; totSales += sales; totDaily += (camp._abDaily||0);
+      totSpend += sp; totSales += sales; totDaily += (camp._abDaily||0); totFat += fatNum;
       var setsTxt = (camp._abActive||0) + '/' + (camp._absets||0);
       var dailyTxt = (camp._abDaily > 0) ? fmtUSD(camp._abDaily) : (camp._abHasLifetime ? '&mdash; (vital.)' : '---');
       if (camp._abHasLifetime && camp._abDaily > 0) dailyTxt = fmtUSD(camp._abDaily) + '<span title="ha conjunto com orcamento vitalicio nao somado" style="color:#9a6700"> &#9888;</span>';
@@ -1746,7 +1774,7 @@ html,body{background:#fbfcfd!important}
            + '</tr>';
     }).join('');
     if (tbody) tbody.innerHTML = rowsHtml;
-    var geralRoas = totSpend > 0 ? (totSales*260)/totSpend : 0;
+    var geralRoas = totSpend > 0 ? totFat/totSpend : 0;
     var geralCls = geralRoas >= 1.5 ? '#1a7f37' : (geralRoas >= 1.3 ? '#9a6700' : (geralRoas > 0 ? '#cf222e' : '#1f2328'));
     if (mEl) {
       mEl.innerHTML = '<div class="mc"><div class="mc-l">Campanhas ABO</div><div class="mc-v">'+aboData.length+'</div><div class="mc-s">'+aboPeriodLabel()+'</div></div>'
@@ -1782,7 +1810,7 @@ html,body{background:#fbfcfd!important}
     var sp = camp._periodSpend || 0;
     var cv = camp._conv;
     var sales = cv ? (cv.sales||0) : 0;
-    var fat = sales * 260;
+    var fat = campFat(camp);
     if (key === 'sales') return cv ? sales : -1;
     if (key === 'cpa') { return (sales > 0 && sp > 0) ? (sp / sales) : Number.MAX_VALUE; }
     if (key === 'roas') return sp > 0 ? (fat / sp) : -1;
@@ -1820,7 +1848,7 @@ html,body{background:#fbfcfd!important}
   function currentDailyOf(camp) { var dl = daysLeftOf(camp), rem = remainingOf(camp); return (dl>0 && rem>0) ? rem/dl : 0; }
   function computeDayMood() {
     var rev = 0, spend = 0;
-    cboData.forEach(function(c){ var s = (c._conv ? c._conv.sales : 0) || 0; rev += s*260; spend += c._periodSpend || 0; });
+    cboData.forEach(function(c){ rev += campFat(c); spend += c._periodSpend || 0; });
     var r = spend > 0 ? rev/spend : 0;
     return { roas: r, mood: (r >= RULES.dayGood ? 'good' : (r >= RULES.dayOk ? 'normal' : 'bad')) };
   }
@@ -1841,7 +1869,7 @@ html,body{background:#fbfcfd!important}
     }
     var sp = camp._periodSpend || 0;
     var sales = (camp._conv ? camp._conv.sales : 0) || 0;
-    var roas = sp > 0 ? (sales*260)/sp : 0;
+    var roas = sp > 0 ? campFat(camp)/sp : 0;
     var cpa = sales > 0 ? sp/sales : Infinity;
     var rem = remainingOf(camp);
     var target = null, action = '', cls = 'd-warn', key = '';
@@ -2049,7 +2077,7 @@ html,body{background:#fbfcfd!important}
   function logRuleHist(camp, sig, action, chg) {
     var sales = (camp._conv ? camp._conv.sales : 0) || 0;
     var spend = camp._periodSpend || 0;
-    var roas = spend > 0 ? (sales*260)/spend : 0;
+    var roas = spend > 0 ? campFat(camp)/spend : 0;
     chg = chg || {};
     var entry = {
       id: camp.id,
@@ -2453,7 +2481,7 @@ html,body{background:#fbfcfd!important}
       var sp = camp._periodSpend || 0, clk = camp._clicks || 0;
       var sales = (hasC && camp._conv) ? (camp._conv.sales||0) : 0;
       var ics = (hasC && camp._conv) ? (camp._conv.ic||0) : 0;
-      var fatNum = sales * 260, roasNum = sp > 0 ? fatNum/sp : 0, lucroNum = fatNum - sp;
+      var fatNum = campFat(camp), roasNum = sp > 0 ? fatNum/sp : 0, lucroNum = fatNum - sp;
       var pct = function(n,d){ return (d>0) ? (n/d*100).toFixed(1).replace('.',',')+'%' : '---'; };
       /* ── Tooltip estilizado com a HORA de cada venda (fuso BR) ──
          Uma venda por linha. Quando ha custo por hora (cumCostByHour), mostra tambem o
@@ -2652,7 +2680,7 @@ html,body{background:#fbfcfd!important}
       T.sp += c._periodSpend || 0; T.clk += c._clicks || 0;
       var sv = (hasC && c._conv) ? (c._conv.sales||0) : 0;
       var iv = (hasC && c._conv) ? (c._conv.ic||0) : 0;
-      T.sales += sv; T.ics += iv; T.fat += sv*260; T.lucro += (sv*260 - (c._periodSpend||0));
+      T.sales += sv; T.ics += iv; var fv = campFat(c); T.fat += fv; T.lucro += (fv - (c._periodSpend||0));
     });
     var tPct = function(n,d){ return d>0 ? (n/d*100).toFixed(1).replace('.',',')+'%' : '---'; };
     var tCPC = T.clk>0 ? fmtUSD(T.sp/T.clk) : '---';
@@ -2811,7 +2839,7 @@ html,body{background:#fbfcfd!important}
     var st = campStatusInfo(camp);
     var sp = camp._periodSpend || 0;
     var sales = (hasC && camp._conv) ? (camp._conv.sales || 0) : 0;
-    var fatNum = sales * 260, roasNum = sp > 0 ? fatNum / sp : 0, lucroNum = fatNum - sp;
+    var fatNum = campFat(camp), roasNum = sp > 0 ? fatNum / sp : 0, lucroNum = fatNum - sp;
     var roasCls = roasNum >= 1.5 ? 'd-good' : (roasNum >= 1.3 ? 'd-warn' : (roasNum > 0 ? 'd-bad' : ''));
     var lucroCls = lucroNum >= 0 ? 'd-good' : 'd-bad';
     var cpaTxt = (sales > 0 && sp > 0) ? fmtUSD(sp / sales) : '---';
@@ -3431,6 +3459,7 @@ html,body{background:#fbfcfd!important}
     var rtP = document.getElementById('rtPInp'); if (rtP) rtP.value = getRtPType();
     var rtIC = document.getElementById('rtICInp'); if (rtIC) rtIC.value = getRtICType();
     var fxi = document.getElementById('fxInp'); if (fxi) fxi.value = getFx();
+    var afi = document.getElementById('acctFilterInp'); if (afi) afi.value = getCboAccts();
   }
 
   /* CBO search filter */
@@ -3602,11 +3631,10 @@ html,body{background:#fbfcfd!important}
   (function(){
     var aac = document.getElementById('autoApplyChk');
     if (!aac) return;
-    /* Dash ISOLADO (dash 2): sem robo. Esconde o interruptor LIVE/DRY e mostra "Isolado — sem robô". */
+    /* Instancias nao-principais nao mostram o controle do robo (esconde por completo, sem texto). */
     if (ISOLATED) {
       var w0 = document.getElementById('autoApplyWrap');
-      if (w0) { var sw = w0.querySelector('.md-switch'); if (sw) sw.style.display = 'none'; w0.style.cursor = 'default'; w0.title = 'Dash isolado: não controla o robô (sem regras/avisos automáticos).'; }
-      var t0 = document.getElementById('autoApplyTxt'); if (t0) { t0.textContent = '\u{1F513} Isolado — sem robô'; t0.style.color = '#8250df'; }
+      if (w0) w0.style.display = 'none';
       return;
     }
     function setLabel(mode, pend){
@@ -3666,6 +3694,7 @@ html,body{background:#fbfcfd!important}
     var rtP = document.getElementById('rtPInp'); if (rtP) saveRtPType(rtP.value.trim());
     var rtIC = document.getElementById('rtICInp'); if (rtIC) saveRtICType(rtIC.value.trim());
     var fxi = document.getElementById('fxInp'); if (fxi) saveFx(fxi.value);
+    var afi = document.getElementById('acctFilterInp'); if (afi) saveCboAccts(afi.value);
     closeModal(); load();
   });
   document.getElementById('settModal').addEventListener('click', function(e) { if (e.target === this) closeModal(); });
