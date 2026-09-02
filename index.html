@@ -246,7 +246,7 @@ html,body{background:#fbfcfd!important}
             <th title="Vendas / Cliques">Purchase CR</th>
             <th title="Vendas / InitiateCheckout">Conv. CO</th>
             <th title="InitiateCheckout / Cliques">IC CR</th>
-            <th title="Valor real das ordens (UTMify)">Faturamento</th>
+            <th title="Receita real: UTMify (valor das ordens) &middot; RedTrack (coluna Revenue)">Faturamento</th>
             <th style="cursor:pointer;user-select:none" data-sort="profit" id="thLucro">Lucro &#8645;</th>
             <th style="cursor:pointer;user-select:none" data-sort="roas" id="thRoas">ROAS &#8645;</th>
           </tr>
@@ -514,13 +514,12 @@ html,body{background:#fbfcfd!important}
   function getRtICType() { try { return localStorage.getItem('rt_ictype') || '2'; } catch(e) { return '2'; } }
   function saveRtICType(v) { try { if (v) localStorage.setItem('rt_ictype', v); else localStorage.removeItem('rt_ictype'); } catch(e) {} }
   function hasConv() { return !!(getRtTk() || getUtmTk()); }
-  /* FATURAMENTO = valor REAL das ordens da UTMify (c._conv.revenue). Sem receita -> 0.
-     (Fallback p/ RedTrack, que nao traz revenue confiavel: comissao fixa $260 x vendas.) */
+  /* FATURAMENTO = receita REAL, direto da fonte (sem multiplicar). RedTrack: coluna "Revenue" vem em R$ ->
+     converte p/ US$ (/ cambio). UTMify: valor das ordens (usado como esta). */
   function campFat(c) {
     var cv = c && c._conv; if (!cv) return 0;
-    if (cv.src === 'utm') return cv.revenue || 0;            /* UTMify: valor real (0 se sem ordem paga) */
-    if (cv.revenue != null && cv.revenue > 0) return cv.revenue;
-    return (cv.sales || 0) * 260;                            /* RedTrack sem revenue -> $260/venda */
+    if (cv.src === 'rt') { var fx = getFx(); return fx > 0 ? (cv.revenue || 0) / fx : (cv.revenue || 0); }
+    return cv.revenue || 0;
   }
   /* URL do Worker (Cloudflare) FIXA no codigo — igual p/ todos que acessam (nao pede a cada um).
      Se mudar o worker, troque so esta linha. (localStorage 'wk_url' ainda sobrescreve, se existir.) */
@@ -1063,13 +1062,15 @@ html,body{background:#fbfcfd!important}
   /* ── Conversoes: prioriza RedTrack, cai para Utmify ── */
   function fetchConversions(camps) {
     camps.forEach(function(c){ c._conv = null; });
-    /* UTMify PRIORITARIO (faturamento = valor real das ordens). RedTrack so como fallback se nao tiver UTMify. */
-    if (getUtmTk()) {
-      return fetchUtmify(camps).catch(function(){
-        return getRtTk() ? fetchRedTrack(camps) : null;
-      });
+    /* FONTE DE VENDAS por INSTANCIA: dash principal -> RedTrack (venda x $260); instancia isolada -> UTMify
+       (faturamento = valor real das ordens). O outro token, se existir, e so fallback. */
+    if (ISOLATED) {
+      if (getUtmTk()) return fetchUtmify(camps).catch(function(){ return getRtTk() ? fetchRedTrack(camps) : null; });
+      if (getRtTk()) return fetchRedTrack(camps);
+    } else {
+      if (getRtTk()) return fetchRedTrack(camps).catch(function(){ return getUtmTk() ? fetchUtmify(camps) : null; });
+      if (getUtmTk()) return fetchUtmify(camps);
     }
-    if (getRtTk()) return fetchRedTrack(camps);
     return Promise.resolve();
   }
 
@@ -1104,7 +1105,8 @@ html,body{background:#fbfcfd!important}
           var sales = parseInt(row['convtype'+pType]) || 0;
           if (!sales) sales = parseInt(row.approved) || 0; /* algumas contas usam 'approved' p/ vendas */
           var ic = parseInt(row['convtype'+icType]) || 0;
-          var rev = parseFloat(row['revenuetype'+pType]) || parseFloat(row.total_revenue) || 0;
+          /* Faturamento = coluna "Revenue" do RedTrack, DIRETO (sem multiplicar). Fallbacks defensivos. */
+          var rev = parseFloat(row.revenue) || parseFloat(row['revenuetype'+pType]) || parseFloat(row.total_revenue) || 0;
           var cost = pickNum(row, ['cost','total_cost','spend','ad_cost']); /* custo do RedTrack em R$ */
           var conv = { sales: sales, ic: ic, revenue: rev, cost: cost, src: 'rt' };
           ['sub3','campaign_id','source_campaign_id','rt_campaign_id','fb_campaign_id','id'].forEach(function(k){
@@ -1426,7 +1428,9 @@ html,body{background:#fbfcfd!important}
               /* Inclui CBO + TESTE (p/ os filtros da aba). ABO tem aba propria. Exige orcamento no nivel da CAMPANHA
                  — vitalicio OU diario. As de orcamento DIARIO entram so p/ VISUALIZAR (sem regra; o worker tbm as
                  ignora, pois exige lifetime_budget). */
-              return !!c.name && (nu.indexOf('CBO') >= 0 || nu.indexOf('TESTE') >= 0) && nu.indexOf('SUBSTITUIDA') < 0 && nu.indexOf('MORTA') < 0 && (!!c.lifetime_budget || !!c.daily_budget);
+              /* Nome elegivel: instancia principal -> CBO/TESTE; instancia isolada -> SALE/SALES (indexOf('SALE') pega os dois). */
+              var nameOk = ISOLATED ? (nu.indexOf('SALE') >= 0) : (nu.indexOf('CBO') >= 0 || nu.indexOf('TESTE') >= 0);
+              return !!c.name && nameOk && nu.indexOf('SUBSTITUIDA') < 0 && nu.indexOf('MORTA') < 0 && (!!c.lifetime_budget || !!c.daily_budget);
             }).forEach(function(c) {
               c._accountName = acc.name; c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; c._acctOffset = acc.timezone_offset_hours_utc; camps.push(c);
             });
