@@ -1488,8 +1488,14 @@ html,body{background:#fbfcfd!important}
       /* PERF: sem `insights.date_preset(maximum){spend}` por conjunto — o gasto vitalicio POR conjunto (s._life)
          nao era usado em lugar nenhum (o hasCap usa lifetime_spend_cap + gasto da CAMPANHA). Tirar isso deixa a
          busca de conjuntos MUITO mais leve/rapida. */
-      var adsetsUrl = API+'/'+acct+'/adsets?fields=id,name,campaign_id,effective_status,bid_amount,lifetime_spend_cap&limit=300&access_token='+tk;
-      var adsUrl = API+'/'+acct+'/ads?fields=campaign_id,effective_status&limit=500&access_token='+tk;
+      /* ESCOPO por CAMPANHA (fix "SEM ANUNCIO"/rate limit): sem filtro, /adsets e /ads da CONTA puxavam
+         TODAS as campanhas (milhares de anuncios) -> paginacao enorme -> rate limit -> fjPagedR devolvia
+         VAZIO -> "SEM ANUNCIO" (com anuncios ativos) e alteracoes falhando. Filtrando por campaign.id IN
+         as campanhas JA carregadas, o volume cai p/ so o que importa. */
+      var _campIds = (gr.camps || []).map(function(c){ return String(c.id); });
+      var _campFilter = _campIds.length ? ('&filtering=' + encodeURIComponent(JSON.stringify([{ field: 'campaign.id', operator: 'IN', value: _campIds }]))) : '';
+      var adsetsUrl = API+'/'+acct+'/adsets?fields=id,name,campaign_id,effective_status,bid_amount,lifetime_spend_cap'+_campFilter+'&limit=300&access_token='+tk;
+      var adsUrl = API+'/'+acct+'/ads?fields=campaign_id,effective_status'+_campFilter+'&limit=500&access_token='+tk;
       var calls = isLifetime
         ? [fjPagedR(lifeUrl), fjPagedR(adsetsUrl), fjPagedR(adsUrl)]
         : [fjPagedR(lifeUrl), fjPagedR(periodUrl), fjPagedR(adsetsUrl), fjPagedR(adsUrl)];
@@ -1527,16 +1533,26 @@ html,body{background:#fbfcfd!important}
             c._cpc = p ? (parseFloat(p.cost_per_inline_link_click) || 0) : 0;
             c._ctr = p ? (parseFloat(p.inline_link_click_ctr) || 0) : 0;
           }
+          var adsets = adsetsByCid[c.id] || [];
           var ads = adsByCid[c.id] || [];
           var relevantes = ads.filter(function(a){ var s=(a.effective_status||'').toUpperCase(); return s!=='ARCHIVED' && s!=='DELETED'; });
-          c._adsErr = null;
-          c._adTotal = relevantes.length;
-          c._adActive = relevantes.filter(function(a){ return (a.effective_status||'').toUpperCase()==='ACTIVE'; }).length;
-          c._adRejected = relevantes.filter(function(a){ return (a.effective_status||'').toUpperCase()==='DISAPPROVED'; }).length;
-          c._adWithErr = relevantes.filter(function(a){ var s=(a.effective_status||'').toUpperCase(); return s==='WITH_ISSUES'||s==='PENDING_REVIEW'; }).length;
-          c._adPaused = relevantes.filter(function(a){ var s=(a.effective_status||'').toUpperCase(); return s==='PAUSED'||s==='ADSET_PAUSED'||s==='CAMPAIGN_PAUSED'; }).length;
-          c._adsLoaded = true;
-          var adsets = adsetsByCid[c.id] || [];
+          /* REDE DE SEGURANCA: conjunto ATIVO SEMPRE tem anuncio. Se a busca de anuncios veio VAZIA mas
+             ha conjunto ativo, foi FALHA de leitura (rate limit da Meta), NAO "campanha sem anuncio" ->
+             marca _adsErr (badge "nao carregou / recarregue") em vez do alarmante "SEM ANUNCIO". */
+          var _temConjAtivo = adsets.some(function(s){ return (s.effective_status||'').toUpperCase()==='ACTIVE'; });
+          if (ads.length === 0 && _temConjAtivo) {
+            c._adsErr = 'limite da Meta ao ler anuncios';
+            c._adsLoaded = false;
+            c._adTotal = 0; c._adActive = 0; c._adRejected = 0; c._adWithErr = 0; c._adPaused = 0;
+          } else {
+            c._adsErr = null;
+            c._adTotal = relevantes.length;
+            c._adActive = relevantes.filter(function(a){ return (a.effective_status||'').toUpperCase()==='ACTIVE'; }).length;
+            c._adRejected = relevantes.filter(function(a){ return (a.effective_status||'').toUpperCase()==='DISAPPROVED'; }).length;
+            c._adWithErr = relevantes.filter(function(a){ var s=(a.effective_status||'').toUpperCase(); return s==='WITH_ISSUES'||s==='PENDING_REVIEW'; }).length;
+            c._adPaused = relevantes.filter(function(a){ var s=(a.effective_status||'').toUpperCase(); return s==='PAUSED'||s==='ADSET_PAUSED'||s==='CAMPAIGN_PAUSED'; }).length;
+            c._adsLoaded = true;
+          }
           var sumCaps = 0, anyCap = false;
           adsets.forEach(function(s) { var life = 0; if (s.insights && s.insights.data && s.insights.data[0]) life = parseFloat(s.insights.data[0].spend) || 0; s._life = life; var cap = (s.lifetime_spend_cap != null) ? +s.lifetime_spend_cap : 0; if (cap > 0) { anyCap = true; sumCaps += cap / 100; } });
           c._adsets = adsets;
