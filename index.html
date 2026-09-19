@@ -3066,12 +3066,16 @@ html,body{background:#fbfcfd!important}
       .then(function(r){ return r.json(); })
       .then(function(d){
         if (d.error) {
-          /* Erro transitorio do Meta ("An unexpected error... Please retry later", code 2,
-             is_transient) -> espera e tenta de novo (ate 2x, backoff 1,5s/3s). Edicao e idempotente. */
-          var msg = d.error.message || '';
-          var transient = d.error.is_transient || d.error.code === 2 || /unexpected error|please (?:retry|try again)|temporar/i.test(msg);
+          var msg = d.error.message || '', code = d.error.code;
+          /* Erro transitorio ("unexpected error / retry later", code 2, is_transient) -> retry rapido (1,5s/3s). */
+          var transient = d.error.is_transient || code === 2 || /unexpected error|please (?:retry|try again)|temporar/i.test(msg);
+          /* RATE LIMIT (#17 user, #4 app, #613 "1 call/30s por objeto", #80004) -> espera MAIS (6s/12s) e retenta. */
+          var rateLtd = code === 17 || code === 4 || code === 613 || code === 80004 || /request limit reached|rate limit|exceeded the (?:concurrent )?request|calls to this api/i.test(msg);
           if (transient && _try < 2) {
             return new Promise(function(res){ setTimeout(res, 1500 * (_try + 1)); }).then(function(){ return postForm(id, tk, params, _try + 1); });
+          }
+          if (rateLtd && _try < 2) {
+            return new Promise(function(res){ setTimeout(res, 6000 * (_try + 1)); }).then(function(){ return postForm(id, tk, params, _try + 1); });
           }
           throw new Error(msg + (d.error.error_user_msg ? ' - '+d.error.error_user_msg : ''));
         }
@@ -3211,36 +3215,54 @@ html,body{background:#fbfcfd!important}
         })
         .catch(function(){ return fromPre(); }); /* a Meta cortou a busca dos conjuntos -> usa os ja carregados */
     }
-    function postOne(s) {
-      /* ESCRITA usa SO o token que leu os conjuntos (useTk). NAO cai p/ outros tokens: um token de OUTRA
-         conta nao enxerga esse conjunto e devolve "Object ... does not exist / missing permissions",
-         mascarando o erro real e tentando escrever entre contas. postForm ja retenta erro transitorio. */
-      return postForm(s.id, useTk, { end_time: endIso })
-        .then(function(){ return null; })
-        .catch(function(e){ return (s.name || s.id) + ': ' + (e && e.message ? e.message : e); });
+    /* Aplica o end_time via BATCH API (lotes de 50, 1 chamada HTTP p/ VARIOS conjuntos = objetos DIFERENTES).
+       Isso evita o limite "1 call por 30s por OBJETO" (#613) que os POSTs um-a-um disparavam. Token pinado
+       (useTk) — sem fallback de token na escrita. Classifica cada sub-resposta: 200=ok; estrutural=ignora
+       (conjunto sem end_time proprio, CBO); rate-limit/#613=fica pendente p/ retry; resto=erro REAL. */
+    function batchEnd(sets) {
+      var chunks = [];
+      for (var k = 0; k < sets.length; k += 50) chunks.push(sets.slice(k, k + 50));
+      var errs = [];
+      var seq = Promise.resolve();
+      chunks.forEach(function(chunk) {
+        seq = seq.then(function() {
+          var body = new URLSearchParams();
+          body.append('batch', JSON.stringify(chunk.map(function(s){ return { method: 'POST', relative_url: String(s.id), body: 'end_time=' + encodeURIComponent(endIso) }; })));
+          body.append('access_token', useTk);
+          return fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+            .then(function(r){ return r.json(); })
+            .then(function(arr){
+              if (arr && arr.error) { errs.push(arr.error.message || 'batch error'); return; }
+              if (!Array.isArray(arr)) return;
+              arr.forEach(function(resp, ix){
+                var s = chunk[ix];
+                if (resp && resp.code === 200) return; /* ok */
+                var msg = ''; try { msg = JSON.parse(resp.body).error.message; } catch(e) { msg = 'erro ' + (resp && resp.code); }
+                var full = (s.name || s.id) + ': ' + msg;
+                if (STRUCT.test(msg)) { skipIds[s.id] = true; if (st.unsupported.indexOf(full) < 0) st.unsupported.push(full); } /* conjunto nao edita end_time (CBO) -> ignora */
+                else errs.push(full); /* erro REAL ou rate-limit (#613/#17...) -> tenta de novo na proxima rodada */
+              });
+            })
+            .catch(function(e){ errs.push(e && e.message ? e.message : String(e)); });
+        });
+      });
+      return seq.then(function(){ return errs; });
     }
-    /* Uma rodada: le o estado atual e posta SEQUENCIAL so nos conjuntos que ainda nao estao na data. */
+    /* Uma rodada: RE-LE os conjuntos, acha os PENDENTES (fora da data, nao-estruturais) e aplica em BATCH.
+       Retry ate 5x. Se o que sobrou for RATE LIMIT (#613 = 1 call/30s por objeto), espera MAIS (12s) p/ a
+       janela abrir; senao 2s. Assim o #613 vira sucesso na proxima rodada em vez de erro na tela. */
     function round(n) {
       return listSets().then(function(sets) {
         if (!sets.length) return;
-        /* pendentes = fora da data E que ainda ACEITAM escrita (pula os estruturais ja detectados). */
         var pend = sets.filter(function(s){ return dayOf(s.end_time) !== wantDay && !skipIds[s.id]; });
-        if (!pend.length) return; /* nada mais p/ escrever */
-        var errs = [], i = 0;
-        function next() {
-          if (i >= pend.length) return Promise.resolve();
-          var s = pend[i++];
-          return postOne(s).then(function(err){
-            if (err) {
-              if (STRUCT.test(err)) { skipIds[s.id] = true; if (st.unsupported.indexOf(err) < 0) st.unsupported.push(err); } /* conjunto nao edita end_time -> ignora (nao e erro real) */
-              else errs.push(err); /* erro REAL (token/rede/param) */
-            }
-            return next();
-          });
-        }
-        return next().then(function(){
-          st.postErrs = errs; /* so os ERROS REAIS de API desta rodada */
-          if (n < 2 && errs.length) return round(n + 1); /* SO repete se houve erro real (transiente) */
+        if (!pend.length) { st.postErrs = []; return; } /* nada mais p/ escrever */
+        return batchEnd(pend).then(function(errs){
+          st.postErrs = errs; /* erros da rodada atual (rate-limit some no retry; real persiste) */
+          if (n < 5 && errs.length) {
+            var isRate = errs.some(function(m){ return /#?613|#?17\b|#?4\b|rate limit|exceeded the (?:concurrent )?request|calls to this api/i.test(m); });
+            var wait = isRate ? 12000 : 2000;
+            return new Promise(function(r){ setTimeout(r, wait); }).then(function(){ return round(n + 1); });
+          }
         });
       });
     }
