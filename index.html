@@ -3207,8 +3207,11 @@ html,body{background:#fbfcfd!important}
         .catch(function(){ return fromPre(); }); /* a Meta cortou a busca dos conjuntos -> usa os ja carregados */
     }
     function postOne(s) {
-      return withTokenFallback(useTk, function(t){ return postForm(s.id, t, { end_time: endIso }); })
-        .then(function(r){ useTk = r.tk; if (onTk) onTk(useTk); return null; })
+      /* ESCRITA usa SO o token que leu os conjuntos (useTk). NAO cai p/ outros tokens: um token de OUTRA
+         conta nao enxerga esse conjunto e devolve "Object ... does not exist / missing permissions",
+         mascarando o erro real e tentando escrever entre contas. postForm ja retenta erro transitorio. */
+      return postForm(s.id, useTk, { end_time: endIso })
+        .then(function(){ return null; })
         .catch(function(e){ return (s.name || s.id) + ': ' + (e && e.message ? e.message : e); });
     }
     /* Uma rodada: le o estado atual e posta SEQUENCIAL so nos conjuntos que ainda nao estao na data. */
@@ -3256,8 +3259,11 @@ html,body{background:#fbfcfd!important}
     var useTk = prefTk, err = null, postOk = false;
     var dayOf = function(v){ if (!v) return null; return (typeof v === 'string') ? v.slice(0,10) : new Date(v*1000).toISOString().split('T')[0]; };
     function post() {
-      return withTokenFallback(useTk, function(t){ return postForm(campId, t, { stop_time: String(endTs) }); })
-        .then(function(r){ useTk = r.tk; if (onTk) onTk(useTk); err = null; postOk = true; }) /* 200 = escrita aceita */
+      /* ESCRITA do stop_time usa SO o token da campanha (useTk). Fallback p/ outros tokens numa ESCRITA
+         so gera "Object ... does not exist / missing permissions" (token de outra conta) e mascara o erro
+         real. O read-back (check) segue com fallback de token, e atualiza useTk se achar outro que leia. */
+      return postForm(campId, useTk, { stop_time: String(endTs) })
+        .then(function(){ if (onTk) onTk(useTk); err = null; postOk = true; }) /* 200 = escrita aceita */
         .catch(function(e){ err = e && e.message ? e.message : String(e); postOk = false; });
     }
     function check() {
