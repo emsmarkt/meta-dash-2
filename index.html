@@ -3166,8 +3166,13 @@ html,body{background:#fbfcfd!important}
     /* postErrs = ERRO REAL de API (token/permissao/param) — falha de verdade. stale = a Meta ACEITOU o POST
        mas o read-back ainda mostra a data antiga (atraso de propagacao OU teto da campanha). accepted = nenhum
        erro real -> a escrita foi aceita (mesmo que o read-back demore). */
-    var st = { total: 0, ok: 0, fails: [], postErrs: [], stale: [], accepted: true };
+    var st = { total: 0, ok: 0, fails: [], postErrs: [], stale: [], unsupported: [], accepted: true };
     var useTk = tk;
+    var skipIds = {}; /* conjuntos que NAO aceitam end_time (CBO lifetime: agenda so na campanha) -> nao re-tenta */
+    /* Erro ESTRUTURAL do conjunto (nao e falha de token/rede/param): a Meta nao deixa editar end_time
+       nesse conjunto (tipico de CBO vitalicio, onde a agenda vive no stop_time da CAMPANHA). Nao e erro real:
+       o sucesso passa a se basear no stop_time da campanha. */
+    var STRUCT = /unsupported post request|does not exist|cannot be loaded|missing permission|does not support this operation|nonexisting field|não é possível|nao e possivel/i;
     var dayOf = function(v){ if (!v) return null; return (typeof v === 'string') ? v.slice(0,10) : new Date(v*1000).toISOString().split('T')[0]; };
     var DEAD_ADS = ['DISAPPROVED','PAUSED','ADSET_PAUSED','CAMPAIGN_PAUSED','ARCHIVED','DELETED'];
     /* FALLBACK: conjuntos JA carregados na tabela (camp._adsets) filtrados p/ os nao-pausados. Usado quando
@@ -3218,35 +3223,43 @@ html,body{background:#fbfcfd!important}
     function round(n) {
       return listSets().then(function(sets) {
         if (!sets.length) return;
-        st.total = sets.length;
-        var pend = sets.filter(function(s){ return dayOf(s.end_time) !== wantDay; });
-        if (!pend.length) return; /* todos ja com a data certa */
+        /* pendentes = fora da data E que ainda ACEITAM escrita (pula os estruturais ja detectados). */
+        var pend = sets.filter(function(s){ return dayOf(s.end_time) !== wantDay && !skipIds[s.id]; });
+        if (!pend.length) return; /* nada mais p/ escrever */
         var errs = [], i = 0;
         function next() {
           if (i >= pend.length) return Promise.resolve();
           var s = pend[i++];
-          return postOne(s).then(function(err){ if (err) errs.push(err); return next(); });
+          return postOne(s).then(function(err){
+            if (err) {
+              if (STRUCT.test(err)) { skipIds[s.id] = true; if (st.unsupported.indexOf(err) < 0) st.unsupported.push(err); } /* conjunto nao edita end_time -> ignora (nao e erro real) */
+              else errs.push(err); /* erro REAL (token/rede/param) */
+            }
+            return next();
+          });
         }
         return next().then(function(){
           st.postErrs = errs; /* so os ERROS REAIS de API desta rodada */
-          if (n < 2) return round(n + 1); /* confere de novo e repete nos que faltaram */
+          if (n < 2 && errs.length) return round(n + 1); /* SO repete se houve erro real (transiente) */
         });
       });
     }
     return round(0).then(function(){
       return listSets().then(function(sets){
-        if (sets.length) st.total = sets.length;
-        st.ok = sets.filter(function(s){ return dayOf(s.end_time) === wantDay; }).length;
+        /* Conta so os conjuntos EDITAVEIS (exclui os estruturais que a Meta nao deixa mudar). */
+        var writable = sets.filter(function(s){ return !skipIds[s.id]; });
+        st.total = writable.length;
+        st.ok = writable.filter(function(s){ return dayOf(s.end_time) === wantDay; }).length;
         st.accepted = st.postErrs.length === 0; /* nenhum erro real -> Meta aceitou as escritas */
-        /* Conjuntos fora da data SEM erro real = STALE (read-back atrasado / teto da campanha), nao erro. */
+        /* Conjuntos editaveis fora da data SEM erro real = STALE (read-back atrasado / teto da campanha), nao erro. */
         if (st.ok < st.total) {
           var known = st.postErrs.join(' ');
-          sets.forEach(function(s){
+          writable.forEach(function(s){
             var d = dayOf(s.end_time);
             if (d !== wantDay && known.indexOf(s.name || s.id) < 0) st.stale.push((s.name || s.id) + ': ainda ' + (d || '?'));
           });
         }
-        st.fails = st.postErrs.concat(st.stale); /* compat: lista completa p/ exibir */
+        st.fails = st.postErrs.concat(st.stale); /* compat: lista completa p/ exibir (sem os estruturais) */
         return st;
       });
     });
@@ -3419,7 +3432,9 @@ html,body{background:#fbfcfd!important}
     seq
       .then(function(st){
         setTotal = st.total; setOk = st.ok; setFails = st.fails || [];
+        var setUnsup = (st.unsupported || []).length; /* conjuntos que nao editam end_time (CBO -> agenda na campanha) */
         if (setTotal) report.push('Conjuntos: ' + setOk + '/' + setTotal);
+        if (setUnsup) report.push(setUnsup + ' conjunto(s) sem data própria (CBO — agenda na campanha)');
         setFails.forEach(function(m){ report.push('  - conjunto -> ' + m); });
         if (campRes) report.push('Campanha: ' + (campRes.ok ? 'confirmada' : (campRes.postOk ? 'aceita (propagando)' : ('erro: ' + (campRes.err || '?')))));
 
