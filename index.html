@@ -621,6 +621,69 @@ html,body{background:#fbfcfd!important}
     }
     return go(url);
   }
+  /* Igual fjPagedR, mas DISTINGUE "leitura falhou" de "0 itens de verdade": devolve {items, err}.
+     err != null => a Meta recusou (rate limit/rede) e NAO da p/ confiar no vazio. Usado p/ confirmar
+     campanha-a-campanha se ela REALMENTE nao tem anuncio (mata o falso "SEM ANUNCIO"). */
+  function fjPagedChecked(url) {
+    var all = [], err = null;
+    function go(u) {
+      return fjRetry(u).then(function(d) {
+        if (d && d.error) { err = d.error.message || 'erro de leitura'; return; }
+        if (d && d.data && d.data.length) all = all.concat(d.data);
+        if (d && d.paging && d.paging.next) return go(d.paging.next);
+      });
+    }
+    return go(url).then(function(){ return { items: all, err: err }; });
+  }
+  /* Confirma, campanha-a-campanha, as ATIVAS que ficaram com 0 anuncios ou erro de leitura no lote.
+     Busca DEDICADA (com retry) que distingue erro x vazio real: se trouxer anuncios -> corrige os
+     contadores (era gap do lote); se a Meta responder 0 DE VERDADE -> mantem "SEM ANUNCIO"; se a leitura
+     FALHAR -> marca "nao carregou/recarregue" (nunca o alarme falso). Elimina o falso "SEM ANUNCIO". */
+  function confirmEmptyAds(list) {
+    /* SUSPEITA = campanha ENTREGANDO (ACTIVE/WITH_ISSUES) que ficou com erro de leitura, 0 anuncios TOTAIS
+       OU 0 anuncios ATIVOS. O lote (conta inteira) as vezes traz so os anuncios PAUSADOS dos conjuntos
+       inativos e PERDE os ativos do conjunto ativo (gap de paginacao) -> confirma 1-a-1 e corrige. */
+    var suspects = (list || []).filter(function(c){
+      var eff = (c.effective_status || c.status || '').toUpperCase();
+      var entregando = eff === 'ACTIVE' || eff === 'WITH_ISSUES';
+      return entregando && (c._adsErr || !c._adTotal || !c._adActive);
+    });
+    if (!suspects.length) return Promise.resolve();
+    var i = 0;
+    function classify(c, ads) {
+      var rel = ads.filter(function(a){ var s=(a.effective_status||'').toUpperCase(); return s!=='ARCHIVED' && s!=='DELETED'; });
+      c._adsErr = null; c._adsLoaded = true;
+      c._adTotal = rel.length;
+      c._adActive = rel.filter(function(a){ return (a.effective_status||'').toUpperCase()==='ACTIVE'; }).length;
+      c._adRejected = rel.filter(function(a){ return (a.effective_status||'').toUpperCase()==='DISAPPROVED'; }).length;
+      c._adWithErr = rel.filter(function(a){ var s=(a.effective_status||'').toUpperCase(); return s==='WITH_ISSUES'||s==='PENDING_REVIEW'; }).length;
+      c._adPaused = rel.filter(function(a){ var s=(a.effective_status||'').toUpperCase(); return s==='PAUSED'||s==='ADSET_PAUSED'||s==='CAMPAIGN_PAUSED'; }).length;
+    }
+    function next() {
+      if (i >= suspects.length) return Promise.resolve();
+      var c = suspects[i++], tk = c._tk;
+      if (!tk) return next();
+      var adsetsP = (c._adsets && c._adsets.length)
+        ? Promise.resolve({ items: c._adsets, err: null })
+        : fjPagedChecked(API+'/'+c.id+'/adsets?fields=id,name,effective_status,bid_amount,lifetime_spend_cap&limit=200&access_token='+tk);
+      return Promise.all([
+        fjPagedChecked(API+'/'+c.id+'/ads?fields=effective_status&limit=300&access_token='+tk),
+        adsetsP
+      ]).then(function(r){
+        var adsRes = r[0], setRes = r[1];
+        if (setRes.items && setRes.items.length && (!c._adsets || !c._adsets.length)) c._adsets = setRes.items;
+        if (adsRes.err) {
+          /* Leitura dos anuncios FALHOU (rate limit) -> nunca "SEM ANUNCIO"; mostra "nao carregou". */
+          c._adsErr = 'não consegui confirmar os anúncios (limite da Meta) — recarregue'; c._adsLoaded = false;
+        } else {
+          /* Leitura OK (mesmo que 0) -> confia. Se 0 = genuinamente sem anuncio. */
+          classify(c, adsRes.items);
+        }
+        return next();
+      }).catch(function(){ return next(); });
+    }
+    return next();
+  }
   /* Igual fjPaged, mas DEVOLVE o erro junto ({data, error}) p/ avisar token quebrado na tela
      (senao as contas daquele token somem em silencio). */
   function fjPagedE(url) {
@@ -1587,6 +1650,9 @@ html,body{background:#fbfcfd!important}
           return Promise.all([
             fetchAppliedShared()
           ]).then(function(){
+            /* Confirma 1-a-1 as campanhas ativas que ficaram "sem anuncio"/erro -> mata o falso "SEM ANUNCIO". */
+            return confirmEmptyAds(camps);
+          }).then(function(){
             cboData = camps; renderCBO();
             var sp = document.getElementById('spinCBO'); if (sp) sp.style.display='none';
             /* Auto-apply agora e responsabilidade do ROBO (interruptor LIVE/DRY). O dashboard nao auto-aplica mais. */
