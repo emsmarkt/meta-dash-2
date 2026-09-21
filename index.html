@@ -3141,7 +3141,9 @@ html,body{background:#fbfcfd!important}
             return new Promise(function(res){ setTimeout(res, 1500 * (_try + 1)); }).then(function(){ return postForm(id, tk, params, _try + 1); });
           }
           if (rateLtd && _try < 2) {
-            return new Promise(function(res){ setTimeout(res, 6000 * (_try + 1)); }).then(function(){ return postForm(id, tk, params, _try + 1); });
+            /* #613 = 1 call/30s POR OBJETO -> espera LONGA (16s, depois 22s) p/ a janela abrir e nao falhar. */
+            var wait613 = (code === 613 || /concurrent request|1 calls? per|per 30 seconds/i.test(msg)) ? (16000 + 6000 * _try) : (6000 * (_try + 1));
+            return new Promise(function(res){ setTimeout(res, wait613); }).then(function(){ return postForm(id, tk, params, _try + 1); });
           }
           throw new Error(msg + (d.error.error_user_msg ? ' - '+d.error.error_user_msg : ''));
         }
@@ -3244,40 +3246,25 @@ html,body{background:#fbfcfd!important}
        o sucesso passa a se basear no stop_time da campanha. */
     var STRUCT = /unsupported post request|does not exist|cannot be loaded|missing permission|does not support this operation|nonexisting field|não é possível|nao e possivel/i;
     var dayOf = function(v){ if (!v) return null; return (typeof v === 'string') ? v.slice(0,10) : new Date(v*1000).toISOString().split('T')[0]; };
-    var DEAD_ADS = ['DISAPPROVED','PAUSED','ADSET_PAUSED','CAMPAIGN_PAUSED','ARCHIVED','DELETED'];
-    /* FALLBACK: conjuntos JA carregados na tabela (camp._adsets) filtrados p/ os nao-pausados. Usado quando
-       a Meta CORTA a busca dos conjuntos ("anuncios NAO carregou") — muda a data mesmo assim, como pedido. */
+    /* SO conjuntos ATIVOS (pedido do usuario 21/09): nao mexe em pausado/rejeitado/arquivado. */
+    var isActiveSet = function(s){ return (s.effective_status || '').toUpperCase() === 'ACTIVE'; };
+    /* FALLBACK: conjuntos JA carregados na tabela (camp._adsets) — SO os ATIVOS. Usado quando a Meta CORTA
+       a busca dos conjuntos ("anuncios NAO carregou") — muda a data mesmo assim, como pedido. */
     var fromPre = function(){
-      return ((preAdsets || []).filter(function(s){ return DEAD_ADS.indexOf((s.effective_status || '').toUpperCase()) < 0; }))
+      return ((preAdsets || []).filter(isActiveSet))
         .map(function(s){ return { id: s.id, name: s.name || s.id, end_time: s.end_time }; });
     };
     function listSets() {
-      /* Conjuntos + status + anuncios. Extende conjunto NAO-pausado que tenha >=1 anuncio ATIVO dentro.
-         Se os anuncios nao vierem (rate limit da Meta), extende assim mesmo desde que o conjunto esteja
-         ativo — evita o "0/0" quando a Meta corta a busca dos anuncios (o print mostrava "anuncios NAO carregou"). */
-      /* "morto" = NAO entrega: rejeitado, pausado ou arquivado. O resto (ACTIVE, PENDING_REVIEW,
-         IN_PROCESS "em analise", WITH_ISSUES) conta como ATIVO. */
-      var DEAD = ['DISAPPROVED','PAUSED','ADSET_PAUSED','CAMPAIGN_PAUSED','ARCHIVED','DELETED'];
-      /* DUAS buscas SEPARADAS (a query aninhada `ads{...}` falhava inteira quando a Meta cortava a busca
-         dos anuncios -> 0 conjuntos). 1) CONJUNTOS (leve, confiavel). 2) ANUNCIOS (best-effort): se vier,
-         filtra p/ conjuntos com >=1 anuncio nao-morto; se a Meta cortar, APLICA em todos os conjuntos live. */
+      /* SO conjuntos ATIVOS (pedido do usuario): busca os conjuntos e fica so com effective_status === ACTIVE.
+         Nao mexe em pausado/rejeitado/arquivado/em-analise. Se a Meta cortar a busca -> usa os ATIVOS ja
+         carregados na tabela (fromPre). */
       return withTokenFallback(useTk, function(t){ return fjThrow(API+'/'+campId+'/adsets?fields=id,name,end_time,effective_status&limit=200&access_token='+t); })
         .then(function(r){
           useTk = r.tk; if (onTk) onTk(useTk);
           var all = (r.result && r.result.data) || [];
-          var live = all.filter(function(s){ return DEAD.indexOf((s.effective_status || '').toUpperCase()) < 0; }); /* conjuntos nao-pausados */
-          if (!live.length) return fromPre(); /* busca vazia -> usa os conjuntos ja carregados na tabela */
-          return withTokenFallback(useTk, function(t){ return fjThrow(API+'/'+campId+'/ads?fields=adset_id,effective_status&limit=500&access_token='+t); })
-            .then(function(ar){
-              useTk = ar.tk; if (onTk) onTk(useTk);
-              var ads = (ar.result && ar.result.data) || null;
-              if (!ads || !ads.length) return live; /* NAO deu p/ saber status dos anuncios -> aplica em todos os live */
-              var liveSet = {};
-              ads.forEach(function(a){ if (a.adset_id && DEAD.indexOf((a.effective_status || '').toUpperCase()) < 0) liveSet[String(a.adset_id)] = true; });
-              var filtered = live.filter(function(s){ return liveSet[String(s.id)]; });
-              return filtered.length ? filtered : live; /* se o filtro zerar (dados estranhos), aplica nos live */
-            })
-            .catch(function(){ return live; }); /* erro na busca de anuncios -> aplica em todos os live */
+          var live = all.filter(isActiveSet); /* SO os ATIVOS */
+          if (!live.length) return fromPre(); /* busca vazia -> usa os ATIVOS ja carregados na tabela */
+          return live;
         })
         .catch(function(){ return fromPre(); }); /* a Meta cortou a busca dos conjuntos -> usa os ja carregados */
     }
@@ -3373,11 +3360,15 @@ html,body{background:#fbfcfd!important}
         .catch(function(){ return null; });
     }
     function round(n) {
-      return post().then(check).then(function(day) {
-        if (day === wantDay) return { ok: true, postOk: true, campDay: day, err: null };
-        if (n < 2) return round(n + 1);
-        /* postOk (aceitou mas read-back atrasado) NAO e erro real; err so se o POST falhou de verdade. */
-        return { ok: false, postOk: postOk, campDay: day, err: err };
+      return post().then(function() {
+        /* POST ACEITO (200): NAO re-posta. O read-back pode atrasar ~1 min (propagacao); re-postar na
+           MESMA campanha em <30s dispara o #613 (1 call/30s por objeto). So confere 1x e devolve. */
+        if (postOk) {
+          return check().then(function(day) { return { ok: day === wantDay, postOk: true, campDay: day, err: null }; });
+        }
+        /* POST FALHOU (erro real; rate-limit ja foi retentado dentro do postForm). Espera e tenta de novo. */
+        if (n < 2) return new Promise(function(r){ setTimeout(r, 8000); }).then(function(){ return round(n + 1); });
+        return check().then(function(day) { return { ok: day === wantDay, postOk: false, campDay: day, err: err }; });
       });
     }
     return round(0);
@@ -3513,9 +3504,11 @@ html,body{background:#fbfcfd!important}
     var campRes = null;
     var doCamp = function(){ return applyCampaignStopTime(camp.id, endTs, useTk, wantDay, function(t){ useTk = t; camp._tk = t; }).then(function(r){ campRes = r; return r; }); };
     var doSets = function(){ return applyEndToAdsets(camp.id, useTk, endIso, wantDay, function(t){ useTk = t; camp._tk = t; }, camp._adsets); };
-    /* estender: campanha (levanta o teto) -> conjuntos -> reconfirma campanha. encurtar: conjuntos -> campanha. */
+    /* estender: campanha (levanta o teto) -> conjuntos -> RECONFIRMA a campanha SO se havia conjunto EDITAVEL
+       (teto de conjunto a vencer). Em CBO vitalicio (conjuntos sem end_time proprio -> st.total===0) a 2a
+       escrita na campanha e INUTIL e dispara o #613 (1 call/30s por objeto) -> pula. encurtar: conjuntos -> campanha. */
     var seq = extend
-      ? doCamp().then(doSets).then(function(st){ return doCamp().then(function(){ return st; }); })
+      ? doCamp().then(doSets).then(function(st){ return (st && st.total > 0) ? doCamp().then(function(){ return st; }) : st; })
       : doSets().then(function(st){ return doCamp().then(function(){ return st; }); });
     seq
       .then(function(st){
