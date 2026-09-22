@@ -649,7 +649,6 @@ html,body{background:#fbfcfd!important}
       return entregando && (c._adsErr || !c._adTotal || !c._adActive);
     });
     if (!suspects.length) return Promise.resolve();
-    var i = 0;
     function classify(c, ads) {
       var rel = ads.filter(function(a){ var s=(a.effective_status||'').toUpperCase(); return s!=='ARCHIVED' && s!=='DELETED'; });
       c._adsErr = null; c._adsLoaded = true;
@@ -659,10 +658,9 @@ html,body{background:#fbfcfd!important}
       c._adWithErr = rel.filter(function(a){ var s=(a.effective_status||'').toUpperCase(); return s==='WITH_ISSUES'||s==='PENDING_REVIEW'; }).length;
       c._adPaused = rel.filter(function(a){ var s=(a.effective_status||'').toUpperCase(); return s==='PAUSED'||s==='ADSET_PAUSED'||s==='CAMPAIGN_PAUSED'; }).length;
     }
-    function next() {
-      if (i >= suspects.length) return Promise.resolve();
-      var c = suspects[i++], tk = c._tk;
-      if (!tk) return next();
+    function doOne(c) {
+      var tk = c._tk;
+      if (!tk) return Promise.resolve();
       var adsetsP = (c._adsets && c._adsets.length)
         ? Promise.resolve({ items: c._adsets, err: null })
         : fjPagedChecked(API+'/'+c.id+'/adsets?fields=id,name,effective_status,bid_amount,lifetime_spend_cap&limit=200&access_token='+tk);
@@ -679,10 +677,18 @@ html,body{background:#fbfcfd!important}
           /* Leitura OK (mesmo que 0) -> confia. Se 0 = genuinamente sem anuncio. */
           classify(c, adsRes.items);
         }
-        return next();
-      }).catch(function(){ return next(); });
+      }).catch(function(){});
     }
-    return next();
+    /* POOL de concorrencia: confirma varias campanhas EM PARALELO (4 por vez) -> rapido, sem sequencial. */
+    var i = 0, CONC = 4;
+    function worker() {
+      if (i >= suspects.length) return Promise.resolve();
+      var c = suspects[i++];
+      return doOne(c).then(worker);
+    }
+    var pool = [];
+    for (var w = 0; w < Math.min(CONC, suspects.length); w++) pool.push(worker());
+    return Promise.all(pool);
   }
   /* Igual fjPaged, mas DEVOLVE o erro junto ({data, error}) p/ avisar token quebrado na tela
      (senao as contas daquele token somem em silencio). */
@@ -1650,11 +1656,16 @@ html,body{background:#fbfcfd!important}
           return Promise.all([
             fetchAppliedShared()
           ]).then(function(){
-            /* Confirma 1-a-1 as campanhas ativas que ficaram "sem anuncio"/erro -> mata o falso "SEM ANUNCIO". */
-            return confirmEmptyAds(camps);
-          }).then(function(){
+            /* RENDERIZA JA (nao trava a tela). A confirmacao dos "suspeitos" roda em SEGUNDO PLANO e
+               re-renderiza quando terminar -> dash rapido + o falso "SEM ANUNCIO" some logo depois. */
             cboData = camps; renderCBO();
             var sp = document.getElementById('spinCBO'); if (sp) sp.style.display='none';
+            confirmEmptyAds(camps).then(function(){
+              if (cboData !== camps) return;
+              /* nao re-renderiza se o usuario estiver digitando num campo (nao apaga data/lance em edicao). */
+              var ae = document.activeElement, ed = ae && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName || '');
+              if (!ed) renderCBO();
+            }).catch(function(){});
             /* Auto-apply agora e responsabilidade do ROBO (interruptor LIVE/DRY). O dashboard nao auto-aplica mais. */
           });
         });
