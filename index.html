@@ -227,6 +227,7 @@ html,body{background:#fbfcfd!important}
             <th colspan="3" class="th-group" style="text-align:center;border-left:1px solid #d0d7de">&#128247; Facebook</th>
             <th colspan="10" class="th-group" style="text-align:center;border-left:1px solid #d0d7de">&#128200; RedTrack / Resultados</th>
             <th rowspan="2" title="Limite de lance (bid cap) dos conjuntos ativos — estrategia BID" style="border-left:1px solid #d0d7de">Limite lance</th>
+            <th rowspan="2" title="Limita no gasto ATUAL da campanha — para agora (1 clique)" style="border-left:1px solid #d0d7de">Limitar agora</th>
             <th rowspan="2" title="Limite de GASTO (teto total) dos conjuntos ativos — vem preenchido com o gasto atual: clique p/ parar agora, ou digite um teto maior">Limite gasto</th>
             <th rowspan="2" title="Saldo / Dias ate termino">Di&#225;rio Meta</th>
             <th rowspan="2">Di&#225;rio Desejado</th>
@@ -2727,6 +2728,7 @@ html,body{background:#fbfcfd!important}
         '<td style="font-size:12px">'+lucroTxt+'</td>' +
         '<td style="font-size:12px">'+roasTxt+'</td>' +
         '<td style="border-left:1px solid #e4e8ee">'+bidCellHtml(camp, i)+'</td>' +
+        '<td style="border-left:1px solid #e4e8ee;text-align:center">'+limitNowCellHtml(camp, i)+'</td>' +
         '<td>'+spendCellHtml(camp, i)+'</td>' +
         '<td style="font-size:12px;color:#9a6700;font-weight:600">'+diarioMeta+'</td>' +
         /* Orcamento DIARIO: sem campo de diario desejado, sem botao de limitar/termino/aplicar (so visualizacao). */
@@ -2757,6 +2759,8 @@ html,body{background:#fbfcfd!important}
       if (bidBtn) bidBtn.addEventListener('click', function() { applyBidCap(i); });
       var bidRowInp = document.getElementById('cbid_'+i);
       if (bidRowInp) bidRowInp.addEventListener('keydown', function(e){ if (e.key === 'Enter') applyBidCap(i); });
+      var limitNowBtn = document.getElementById('climitnow_'+i);
+      if (limitNowBtn) limitNowBtn.addEventListener('click', function() { limitSpendNow(i); });
       var spendBtn = document.getElementById('cspendbtn_'+i);
       if (spendBtn) spendBtn.addEventListener('click', function() { applySpendCap(i); });
       var spendRowInp = document.getElementById('cspend_'+i);
@@ -2814,7 +2818,7 @@ html,body{background:#fbfcfd!important}
       '<td style="color:#1a7f37">'+(hasC&&T.fat>0?fmtUSD(T.fat):'---')+'</td>' +
       '<td>'+(hasC?'<span class="'+(T.lucro>=0?'d-good':'d-bad')+'">'+fmtUSD(T.lucro)+'</span>':'---')+'</td>' +
       '<td>'+(hasC&&tRoas>0?'<span class="'+(tRoas>=1.4?'d-good':(tRoas>=1.2?'d-warn':'d-bad'))+'">'+tRoas.toFixed(2).replace('.',',')+'</span>':'---')+'</td>' +
-      '<td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>' +
+      '<td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>' +
       '</tr>';
   }
 
@@ -2999,7 +3003,8 @@ html,body{background:#fbfcfd!important}
           + '<input class="cbo-inp" id="detCapInp" type="number" min="1" step="any" value="' + capPre + '" style="width:74px" title="Teto de gasto (US$). Deixe no gasto atual e Aplique p/ parar agora, ou digite um valor maior.">'
           + '<button class="save-btn" id="detCapSave" style="padding:5px 10px">Aplicar</button>'
           + '</span></div>'
-          + '<div style="font-size:10px;color:#656d76;text-align:right;margin-top:-3px">gasto atual: ' + fmtUSD(spent) + ' · deixe nesse valor e Aplique p/ <b>parar agora</b>, ou digite um teto maior · ' + actSetsB.length + ' conjunto(s) ativo(s) · <a href="#" id="detCapRemove" style="color:#0969da">remover</a></div>';
+          + '<div style="font-size:10px;color:#656d76;text-align:right;margin-top:-3px">gasto atual: ' + fmtUSD(spent) + ' · deixe nesse valor e Aplique p/ <b>parar agora</b>, ou digite um teto maior · ' + actSetsB.length + ' conjunto(s) ativo(s)</div>'
+          + '<div style="text-align:right;margin-top:4px"><button id="detCapRemove" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.02em;color:#fff;background:#cf222e;border:none;border-radius:6px;padding:6px 12px;cursor:pointer" title="Remover o limite de gasto (volta a rodar sem teto)">Remover limite</button></div>';
 
     /* Sugestao de regra: reaproveita o HTML ja renderizado na celula da tabela. */
     var sugCell = document.getElementById('sugcell_'+i);
@@ -3142,16 +3147,29 @@ html,body{background:#fbfcfd!important}
   /* LIMITE DE GASTO manual: seta lifetime_spend_cap (teto TOTAL de gasto) em TODOS os conjuntos ATIVOS.
      Batch API (rapido, sem #613). Conjunto que a Meta recusar por estar ABAIXO do minimo (ja gastou perto)
      -> capAdset individual, que LE o minimo da mensagem e aplica o minimo permitido. Verifica lendo de volta. */
-  function applySpendCap(i) {
+  /* "Limitar gasto agora": limita no GASTO ATUAL da campanha (para agora), sem precisar digitar. */
+  function limitSpendNow(i) {
+    var camp = cboData[i]; if (!camp) return;
+    var nowVal = Math.max(1, Math.ceil(camp._spend || camp._periodSpend || 0));
+    applySpendCap(i, nowVal);
+  }
+  function applySpendCap(i, overrideVal) {
     var camp = cboData[i];
     if (!camp) return;
-    /* le do campo da LINHA (cspend_i) ou do painel de DETALHE (detCapInp) — a funcao serve os dois. */
-    var inp = document.getElementById('cspend_' + i) || document.getElementById('detCapInp');
-    if (!inp) return;
-    var val = parseFloat(inp.value);
-    if (!(val > 0)) { alert('Digite um valor válido (US$).'); return; }
+    var val;
+    if (overrideVal != null && overrideVal > 0) {
+      val = overrideVal; /* botao "Limitar agora": valor = gasto atual */
+    } else {
+      /* le do campo da LINHA (cspend_i) ou do painel de DETALHE (detCapInp) — a funcao serve os dois. */
+      var inp = document.getElementById('cspend_' + i) || document.getElementById('detCapInp');
+      if (!inp) return;
+      val = parseFloat(inp.value);
+      if (!(val > 0)) { alert('Digite um valor válido (US$).'); return; }
+    }
     var cents = Math.round(val * 100);
-    var btn = document.getElementById('cspendbtn_' + i) || document.getElementById('detCapSave');
+    var btn = (overrideVal != null)
+      ? (document.getElementById('climitnow_' + i) || document.getElementById('cspendbtn_' + i) || document.getElementById('detCapSave'))
+      : (document.getElementById('cspendbtn_' + i) || document.getElementById('detCapSave'));
     var btnLabel = btn ? btn.innerHTML : 'Aplicar';
     var restore = function(){ if (btn) { btn.disabled = false; btn.innerHTML = btnLabel; } };
     if (btn) { btn.disabled = true; btn.textContent = '…'; }
@@ -3564,24 +3582,29 @@ html,body{background:#fbfcfd!important}
   /* Celula "Limite gasto" (lifetime_spend_cap): teto TOTAL de gasto por conjunto ATIVO. Vem PRE-PREENCHIDA
      com o gasto atual da campanha -> clicar ✓ = PARAR agora; digitar um teto maior = deixa gastar ate ali. */
   function spendCellHtml(camp, i) {
-    if (!camp.lifetime_budget) return '<span style="font-size:11px;color:#656d76" title="orçamento diário — sem limite de gasto vitalício">—</span>';
+    /* Aparece em TODAS as campanhas. Nao exige _adsets carregados: o applySpendCap busca os conjuntos
+       FRESCOS na hora de aplicar. Se ja tiver _adsets, usa p/ mostrar o teto atual + pre-preencher. */
     var actSets = (camp._adsets || []).filter(function(s){ return (s.effective_status || '').toUpperCase() === 'ACTIVE'; });
-    if (!actSets.length) return '<span style="font-size:11px;color:#656d76">—</span>';
     var lbCents = parseInt(camp.lifetime_budget) || 0;
     var capsC = actSets.map(function(s){ return (s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0) ? +s.lifetime_spend_cap : null; }).filter(function(v){ return v != null; });
     var realCaps = capsC.filter(function(v){ return !(lbCents > 0 && v >= lbCents); }); /* teto >= orcamento total = sem limite */
     var uniq = realCaps.filter(function(v, ix, a){ return a.indexOf(v) === ix; });
     var cur = realCaps.length ? (uniq.length === 1 ? fmtUSD(uniq[0]/100) : (fmtUSD(Math.min.apply(null,realCaps)/100) + '–' + fmtUSD(Math.max.apply(null,realCaps)/100))) : 'sem limite';
-    var pre = realCaps.length ? Math.round(Math.max.apply(null,realCaps)/100) : Math.max(1, Math.ceil(camp._spend || 0));
-    return '<div style="display:flex;flex-direction:column;gap:2px;min-width:96px">'
+    var pre = realCaps.length ? Math.round(Math.max.apply(null,realCaps)/100) : Math.max(1, Math.ceil(camp._spend || camp._periodSpend || 0));
+    return '<div style="display:flex;flex-direction:column;gap:3px;min-width:96px">'
       + '<span style="font-size:10px;color:#656d76" title="teto de gasto atual dos conjuntos ativos">' + cur + '</span>'
       + '<div style="display:flex;align-items:center;gap:3px">'
       + '<span style="font-size:11px;color:#656d76">$</span>'
       + '<input class="cbo-inp" id="cspend_' + i + '" type="number" min="1" step="any" value="' + pre + '" style="width:60px" title="Teto de gasto (US$). Vem no gasto atual: clique ✓ p/ PARAR agora, ou digite um teto maior.">'
       + '<button class="save-btn" id="cspendbtn_' + i + '" style="padding:4px 8px" title="Aplicar teto de gasto nos conjuntos ativos (Batch). Deixe no gasto atual p/ parar agora.">&#10003;</button>'
       + '</div>'
-      + (realCaps.length ? '<a href="#" id="cspendrem_' + i + '" style="font-size:9px;color:#0969da;text-align:right" title="Remover o limite de gasto (volta a rodar sem teto)">remover limite</a>' : '')
+      + (realCaps.length ? '<button id="cspendrem_' + i + '" style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.02em;color:#fff;background:#cf222e;border:none;border-radius:5px;padding:4px 8px;cursor:pointer" title="Remover o limite de gasto (volta a rodar sem teto)">Remover limite</button>' : '')
       + '</div>';
+  }
+
+  /* Celula "Limitar agora": botao unico que limita no GASTO ATUAL da campanha (para agora). Em TODAS as campanhas. */
+  function limitNowCellHtml(camp, i) {
+    return '<button class="save-btn" id="climitnow_' + i + '" style="padding:6px 9px;font-size:11px;font-weight:600;white-space:nowrap;background:#cf5b12;border-color:#cf5b12" title="Limita no gasto ATUAL da campanha — a campanha para agora">⛔ Limitar agora</button>';
   }
 
   /* ===== EDITAR ORCAMENTO da campanha (diario OU total) direto no Meta ===== */
