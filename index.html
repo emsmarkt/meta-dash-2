@@ -515,10 +515,12 @@ html,body{background:#fbfcfd!important}
   function getRtICType() { try { return localStorage.getItem('rt_ictype') || '2'; } catch(e) { return '2'; } }
   function saveRtICType(v) { try { if (v) localStorage.setItem('rt_ictype', v); else localStorage.removeItem('rt_ictype'); } catch(e) {} }
   function hasConv() { return !!(getRtTk() || getUtmTk()); }
-  /* FATURAMENTO = receita REAL, direto da fonte (sem multiplicar). RedTrack: coluna "Revenue" JÁ VEM EM USD
-     (mudança SET/2026) -> usa DIRETO, NÃO divide por câmbio. UTMify: valor das ordens (USD, direto). */
+  /* FATURAMENTO. RedTrack (dash principal): cada VENDA vale a comissão FIXA (RULES.commission = $120) ->
+     faturamento = nº de vendas × $120 (pedido do usuário 23/09). UTMify (instância isolada): valor REAL
+     das ordens (USD, direto). */
   function campFat(c) {
     var cv = c && c._conv; if (!cv) return 0;
+    if (cv.src === 'rt') return (cv.sales || 0) * RULES.commission;
     return cv.revenue || 0;
   }
   /* URL do Worker (Cloudflare) FIXA no codigo — igual p/ todos que acessam (nao pede a cada um).
