@@ -227,6 +227,7 @@ html,body{background:#fbfcfd!important}
             <th colspan="3" class="th-group" style="text-align:center;border-left:1px solid #d0d7de">&#128247; Facebook</th>
             <th colspan="10" class="th-group" style="text-align:center;border-left:1px solid #d0d7de">&#128200; RedTrack / Resultados</th>
             <th rowspan="2" title="Limite de lance (bid cap) dos conjuntos ativos — estrategia BID" style="border-left:1px solid #d0d7de">Limite lance</th>
+            <th rowspan="2" title="Limite de GASTO (teto total) dos conjuntos ativos — vem preenchido com o gasto atual: clique p/ parar agora, ou digite um teto maior">Limite gasto</th>
             <th rowspan="2" title="Saldo / Dias ate termino">Di&#225;rio Meta</th>
             <th rowspan="2">Di&#225;rio Desejado</th>
             <th rowspan="2">Sugest&#227;o Or&#231;.</th>
@@ -2726,6 +2727,7 @@ html,body{background:#fbfcfd!important}
         '<td style="font-size:12px">'+lucroTxt+'</td>' +
         '<td style="font-size:12px">'+roasTxt+'</td>' +
         '<td style="border-left:1px solid #e4e8ee">'+bidCellHtml(camp, i)+'</td>' +
+        '<td>'+spendCellHtml(camp, i)+'</td>' +
         '<td style="font-size:12px;color:#9a6700;font-weight:600">'+diarioMeta+'</td>' +
         /* Orcamento DIARIO: sem campo de diario desejado, sem botao de limitar/termino/aplicar (so visualizacao). */
         '<td>'+(isDaily ? '' : '<input class="cbo-inp" id="cdaily_'+i+'" type="number" min="1" step="any" placeholder="ex: 100">')+'</td>' +
@@ -2755,6 +2757,12 @@ html,body{background:#fbfcfd!important}
       if (bidBtn) bidBtn.addEventListener('click', function() { applyBidCap(i); });
       var bidRowInp = document.getElementById('cbid_'+i);
       if (bidRowInp) bidRowInp.addEventListener('keydown', function(e){ if (e.key === 'Enter') applyBidCap(i); });
+      var spendBtn = document.getElementById('cspendbtn_'+i);
+      if (spendBtn) spendBtn.addEventListener('click', function() { applySpendCap(i); });
+      var spendRowInp = document.getElementById('cspend_'+i);
+      if (spendRowInp) spendRowInp.addEventListener('keydown', function(e){ if (e.key === 'Enter') applySpendCap(i); });
+      var spendRem = document.getElementById('cspendrem_'+i);
+      if (spendRem) spendRem.addEventListener('click', function(e){ e.preventDefault(); removeSpendCap(i); });
       /* Item 4 (mobile): toque na 1a coluna (campanha) abre o card de detalhes.
          So vincula em touch p/ nao mudar nada no desktop. */
       if (isTouchDevice()) {
@@ -2806,7 +2814,7 @@ html,body{background:#fbfcfd!important}
       '<td style="color:#1a7f37">'+(hasC&&T.fat>0?fmtUSD(T.fat):'---')+'</td>' +
       '<td>'+(hasC?'<span class="'+(T.lucro>=0?'d-good':'d-bad')+'">'+fmtUSD(T.lucro)+'</span>':'---')+'</td>' +
       '<td>'+(hasC&&tRoas>0?'<span class="'+(tRoas>=1.4?'d-good':(tRoas>=1.2?'d-warn':'d-bad'))+'">'+tRoas.toFixed(2).replace('.',',')+'</span>':'---')+'</td>' +
-      '<td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>' +
+      '<td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>' +
       '</tr>';
   }
 
@@ -2981,15 +2989,17 @@ html,body{background:#fbfcfd!important}
     var realCaps = capsC.filter(function(v){ return !(lbCentsD > 0 && v >= lbCentsD); }); /* teto >= orcamento total = sem limite na pratica */
     var uniqCap = realCaps.filter(function(v, ix, a){ return a.indexOf(v) === ix; });
     var capCurTxt = realCaps.length ? (uniqCap.length === 1 ? fmtUSD(uniqCap[0]/100) : (fmtUSD(Math.min.apply(null,realCaps)/100) + '–' + fmtUSD(Math.max.apply(null,realCaps)/100))) : 'sem limite';
-    var capPre = realCaps.length ? Math.round(Math.max.apply(null,realCaps)/100) : '';
+    /* PRE-PREENCHE com o teto atual (se houver) OU com o GASTO ATUAL da campanha -> "clicar Aplicar = parar
+       no gasto de agora". Digitar um valor MAIOR = deixa gastar ate ali e para. (spent = gasto vitalicio). */
+    var capPre = realCaps.length ? Math.round(Math.max.apply(null,realCaps)/100) : Math.max(1, Math.ceil(spent));
     body += '<div class="det-row" style="align-items:center"><span class="det-k">Limite de gasto</span>'
           + '<span class="det-v" style="display:flex;align-items:center;gap:6px;justify-content:flex-end">'
-          + '<span style="font-size:11px;color:#656d76" title="teto TOTAL de gasto atual dos conjuntos ativos">' + capCurTxt + '</span>'
+          + '<span style="font-size:11px;color:#656d76" title="teto de gasto atual dos conjuntos ativos">' + capCurTxt + '</span>'
           + '<span style="font-size:11px;color:#656d76">$</span>'
-          + '<input class="cbo-inp" id="detCapInp" type="number" min="1" step="any" value="' + capPre + '" style="width:74px" title="Novo limite de gasto TOTAL por conjunto (US$)">'
+          + '<input class="cbo-inp" id="detCapInp" type="number" min="1" step="any" value="' + capPre + '" style="width:74px" title="Teto de gasto (US$). Deixe no gasto atual e Aplique p/ parar agora, ou digite um valor maior.">'
           + '<button class="save-btn" id="detCapSave" style="padding:5px 10px">Aplicar</button>'
           + '</span></div>'
-          + '<div style="font-size:10px;color:#656d76;text-align:right;margin-top:-3px">teto TOTAL de gasto de cada conjunto · aplica em ' + actSetsB.length + ' ativo(s) · <a href="#" id="detCapRemove" style="color:#0969da">remover</a></div>';
+          + '<div style="font-size:10px;color:#656d76;text-align:right;margin-top:-3px">gasto atual: ' + fmtUSD(spent) + ' · deixe nesse valor e Aplique p/ <b>parar agora</b>, ou digite um teto maior · ' + actSetsB.length + ' conjunto(s) ativo(s) · <a href="#" id="detCapRemove" style="color:#0969da">remover</a></div>';
 
     /* Sugestao de regra: reaproveita o HTML ja renderizado na celula da tabela. */
     var sugCell = document.getElementById('sugcell_'+i);
@@ -3135,12 +3145,13 @@ html,body{background:#fbfcfd!important}
   function applySpendCap(i) {
     var camp = cboData[i];
     if (!camp) return;
-    var inp = document.getElementById('detCapInp');
+    /* le do campo da LINHA (cspend_i) ou do painel de DETALHE (detCapInp) — a funcao serve os dois. */
+    var inp = document.getElementById('cspend_' + i) || document.getElementById('detCapInp');
     if (!inp) return;
     var val = parseFloat(inp.value);
     if (!(val > 0)) { alert('Digite um valor válido (US$).'); return; }
     var cents = Math.round(val * 100);
-    var btn = document.getElementById('detCapSave');
+    var btn = document.getElementById('cspendbtn_' + i) || document.getElementById('detCapSave');
     var btnLabel = btn ? btn.innerHTML : 'Aplicar';
     var restore = function(){ if (btn) { btn.disabled = false; btn.innerHTML = btnLabel; } };
     if (btn) { btn.disabled = true; btn.textContent = '…'; }
@@ -3231,15 +3242,15 @@ html,body{background:#fbfcfd!important}
     var capped = (camp._adsets || []).filter(function(s){ return (s.effective_status||'').toUpperCase()==='ACTIVE' && s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0 && +s.lifetime_spend_cap < noCap; });
     if (!capped.length) { alert('Nenhum conjunto ativo com limite para remover.'); return; }
     if (!confirm('REMOVER o limite de gasto de "' + camp.name + '"?\nO teto sobe p/ o orçamento total ($' + Math.round(noCap/100).toLocaleString('pt-BR') + ') = sem limite na prática. ' + capped.length + ' conjunto(s).')) return;
-    var btn = document.getElementById('detCapSave');
-    if (btn) { btn.disabled = true; btn.textContent = 'Removendo…'; }
+    var btn = document.getElementById('cspendbtn_' + i) || document.getElementById('detCapSave');
+    if (btn) { btn.disabled = true; btn.innerHTML = '…'; }
     Promise.all(capped.map(function(s){ return capAdset(camp._tk, s.id, noCap); })).then(function(){
       camp._hasCap = false;
       (camp._adsets || []).forEach(function(s){ if ((s.effective_status||'').toUpperCase()==='ACTIVE') s.lifetime_spend_cap = noCap; });
       notifyOk('Limite REMOVIDO de "' + camp.name + '"', capped.length + ' conjunto(s) liberado(s) — a campanha volta a rodar sem teto.');
       closeCboDetail();
       renderCBO();
-    }).catch(function(e){ notifyErr('Erro ao REMOVER limite de "' + camp.name + '"', e && e.message ? e.message : ''); if (btn) { btn.disabled = false; btn.textContent = 'Aplicar'; } });
+    }).catch(function(e){ notifyErr('Erro ao REMOVER limite de "' + camp.name + '"', e && e.message ? e.message : ''); if (btn) { btn.disabled = false; renderCBO(); } });
   }
 
   function calcCBORow(i, source) {
@@ -3548,6 +3559,29 @@ html,body{background:#fbfcfd!important}
       + '<input class="cbo-inp" id="cbid_' + i + '" type="number" min="1" step="any" value="' + pre + '" placeholder="ex: 160" style="width:58px" title="Novo valor (US$) — aplica em TODOS os conjuntos ativos (via Batch)">'
       + '<button class="save-btn" id="cbidbtn_' + i + '" style="padding:4px 8px" title="Aplicar em todos os conjuntos ativos (Batch API)">&#10003;</button>'
       + '</div></div>';
+  }
+
+  /* Celula "Limite gasto" (lifetime_spend_cap): teto TOTAL de gasto por conjunto ATIVO. Vem PRE-PREENCHIDA
+     com o gasto atual da campanha -> clicar ✓ = PARAR agora; digitar um teto maior = deixa gastar ate ali. */
+  function spendCellHtml(camp, i) {
+    if (!camp.lifetime_budget) return '<span style="font-size:11px;color:#656d76" title="orçamento diário — sem limite de gasto vitalício">—</span>';
+    var actSets = (camp._adsets || []).filter(function(s){ return (s.effective_status || '').toUpperCase() === 'ACTIVE'; });
+    if (!actSets.length) return '<span style="font-size:11px;color:#656d76">—</span>';
+    var lbCents = parseInt(camp.lifetime_budget) || 0;
+    var capsC = actSets.map(function(s){ return (s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0) ? +s.lifetime_spend_cap : null; }).filter(function(v){ return v != null; });
+    var realCaps = capsC.filter(function(v){ return !(lbCents > 0 && v >= lbCents); }); /* teto >= orcamento total = sem limite */
+    var uniq = realCaps.filter(function(v, ix, a){ return a.indexOf(v) === ix; });
+    var cur = realCaps.length ? (uniq.length === 1 ? fmtUSD(uniq[0]/100) : (fmtUSD(Math.min.apply(null,realCaps)/100) + '–' + fmtUSD(Math.max.apply(null,realCaps)/100))) : 'sem limite';
+    var pre = realCaps.length ? Math.round(Math.max.apply(null,realCaps)/100) : Math.max(1, Math.ceil(camp._spend || 0));
+    return '<div style="display:flex;flex-direction:column;gap:2px;min-width:96px">'
+      + '<span style="font-size:10px;color:#656d76" title="teto de gasto atual dos conjuntos ativos">' + cur + '</span>'
+      + '<div style="display:flex;align-items:center;gap:3px">'
+      + '<span style="font-size:11px;color:#656d76">$</span>'
+      + '<input class="cbo-inp" id="cspend_' + i + '" type="number" min="1" step="any" value="' + pre + '" style="width:60px" title="Teto de gasto (US$). Vem no gasto atual: clique ✓ p/ PARAR agora, ou digite um teto maior.">'
+      + '<button class="save-btn" id="cspendbtn_' + i + '" style="padding:4px 8px" title="Aplicar teto de gasto nos conjuntos ativos (Batch). Deixe no gasto atual p/ parar agora.">&#10003;</button>'
+      + '</div>'
+      + (realCaps.length ? '<a href="#" id="cspendrem_' + i + '" style="font-size:9px;color:#0969da;text-align:right" title="Remover o limite de gasto (volta a rodar sem teto)">remover limite</a>' : '')
+      + '</div>';
   }
 
   /* ===== EDITAR ORCAMENTO da campanha (diario OU total) direto no Meta ===== */
