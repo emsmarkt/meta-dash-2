@@ -2975,6 +2975,22 @@ html,body{background:#fbfcfd!important}
           + '</span></div>'
           + '<div style="font-size:10px;color:#656d76;text-align:right;margin-top:-3px">aplica em ' + actSetsB.length + ' conjunto(s) ativo(s) · estratégia BID</div>';
 
+    /* LIMITE DE GASTO (lifetime_spend_cap): TETO TOTAL de gasto por conjunto ATIVO. Manual. */
+    var lbCentsD = parseInt(camp.lifetime_budget) || 0;
+    var capsC = actSetsB.map(function(s){ return (s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0) ? +s.lifetime_spend_cap : null; }).filter(function(v){ return v != null; });
+    var realCaps = capsC.filter(function(v){ return !(lbCentsD > 0 && v >= lbCentsD); }); /* teto >= orcamento total = sem limite na pratica */
+    var uniqCap = realCaps.filter(function(v, ix, a){ return a.indexOf(v) === ix; });
+    var capCurTxt = realCaps.length ? (uniqCap.length === 1 ? fmtUSD(uniqCap[0]/100) : (fmtUSD(Math.min.apply(null,realCaps)/100) + '–' + fmtUSD(Math.max.apply(null,realCaps)/100))) : 'sem limite';
+    var capPre = realCaps.length ? Math.round(Math.max.apply(null,realCaps)/100) : '';
+    body += '<div class="det-row" style="align-items:center"><span class="det-k">Limite de gasto</span>'
+          + '<span class="det-v" style="display:flex;align-items:center;gap:6px;justify-content:flex-end">'
+          + '<span style="font-size:11px;color:#656d76" title="teto TOTAL de gasto atual dos conjuntos ativos">' + capCurTxt + '</span>'
+          + '<span style="font-size:11px;color:#656d76">$</span>'
+          + '<input class="cbo-inp" id="detCapInp" type="number" min="1" step="any" value="' + capPre + '" style="width:74px" title="Novo limite de gasto TOTAL por conjunto (US$)">'
+          + '<button class="save-btn" id="detCapSave" style="padding:5px 10px">Aplicar</button>'
+          + '</span></div>'
+          + '<div style="font-size:10px;color:#656d76;text-align:right;margin-top:-3px">teto TOTAL de gasto de cada conjunto · aplica em ' + actSetsB.length + ' ativo(s) · <a href="#" id="detCapRemove" style="color:#0969da">remover</a></div>';
+
     /* Sugestao de regra: reaproveita o HTML ja renderizado na celula da tabela. */
     var sugCell = document.getElementById('sugcell_'+i);
     if (sugCell && sugCell.innerHTML.trim()) {
@@ -3004,6 +3020,12 @@ html,body{background:#fbfcfd!important}
     if (bBid) bBid.addEventListener('click', function(){ applyBidCap(i); });
     var bidInp = document.getElementById('detBidInp');
     if (bidInp) bidInp.addEventListener('keydown', function(e){ if (e.key === 'Enter') applyBidCap(i); });
+    var bCap = document.getElementById('detCapSave');
+    if (bCap) bCap.addEventListener('click', function(){ applySpendCap(i); });
+    var capInp = document.getElementById('detCapInp');
+    if (capInp) capInp.addEventListener('keydown', function(e){ if (e.key === 'Enter') applySpendCap(i); });
+    var capRem = document.getElementById('detCapRemove');
+    if (capRem) capRem.addEventListener('click', function(e){ e.preventDefault(); removeSpendCap(i); });
 
     m.classList.add('show');
   }
@@ -3105,6 +3127,119 @@ html,body{background:#fbfcfd!important}
       notifyErr('Erro ao buscar conjuntos de "' + camp.name + '"', (e && e.message ? e.message : String(e)));
       restore();
     });
+  }
+
+  /* LIMITE DE GASTO manual: seta lifetime_spend_cap (teto TOTAL de gasto) em TODOS os conjuntos ATIVOS.
+     Batch API (rapido, sem #613). Conjunto que a Meta recusar por estar ABAIXO do minimo (ja gastou perto)
+     -> capAdset individual, que LE o minimo da mensagem e aplica o minimo permitido. Verifica lendo de volta. */
+  function applySpendCap(i) {
+    var camp = cboData[i];
+    if (!camp) return;
+    var inp = document.getElementById('detCapInp');
+    if (!inp) return;
+    var val = parseFloat(inp.value);
+    if (!(val > 0)) { alert('Digite um valor válido (US$).'); return; }
+    var cents = Math.round(val * 100);
+    var btn = document.getElementById('detCapSave');
+    var btnLabel = btn ? btn.innerHTML : 'Aplicar';
+    var restore = function(){ if (btn) { btn.disabled = false; btn.innerHTML = btnLabel; } };
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    var useTk = camp._tk;
+    var isActiveSet = function(s){ return (s.effective_status || '').toUpperCase() === 'ACTIVE'; };
+    var hasCap = function(v){ return v != null && parseInt(v) >= cents - 1; }; /* teto setado no valor pedido (ou acima, se a Meta exigiu o minimo) */
+    var adsetsUrl = function(){ return API + '/' + camp.id + '/adsets?fields=id,name,effective_status,lifetime_spend_cap&limit=500&access_token=' + useTk; };
+    var lastErr = '';
+    function syncDisplay(freshSets){
+      var byId = {}; (freshSets || []).forEach(function(s){ byId[s.id] = s.lifetime_spend_cap; });
+      (camp._adsets || []).forEach(function(s){ if (byId[s.id] != null) s.lifetime_spend_cap = byId[s.id]; });
+    }
+    /* Batch: seta lifetime_spend_cap=cents nos ids (lotes de 50). */
+    function batchApply(ids){
+      var chunks = [];
+      for (var k = 0; k < ids.length; k += 50) chunks.push(ids.slice(k, k + 50));
+      var seq = Promise.resolve();
+      chunks.forEach(function(chunk){
+        seq = seq.then(function(){
+          var body = new URLSearchParams();
+          body.append('batch', JSON.stringify(chunk.map(function(id){ return { method: 'POST', relative_url: id, body: 'lifetime_spend_cap=' + cents }; })));
+          body.append('access_token', useTk);
+          return fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+            .then(function(r){ return r.json(); })
+            .then(function(arr){
+              if (arr && arr.error) { lastErr = arr.error.message || 'batch error'; return; }
+              if (Array.isArray(arr)) arr.forEach(function(resp){ if (!(resp && resp.code === 200)) { try { lastErr = JSON.parse(resp.body).error.message; } catch (e) {} } });
+            })
+            .catch(function(e){ lastErr = e && e.message ? e.message : String(e); });
+        });
+      });
+      return seq;
+    }
+    /* Pendentes (recusados por MINIMO) -> capAdset individual: le "pelo menos $X" e aplica o minimo permitido. */
+    function fixPending(sets){
+      return Promise.all(sets.map(function(s){
+        return capAdset(useTk, s.id, cents).then(function(){ return null; }).catch(function(e){ lastErr = e && e.message ? e.message : String(e); return (s.name || s.id); });
+      }));
+    }
+    /* RE-LE, acha pendentes e reaplica (1a rodada batch, depois capAdset individual). Ate 3 rodadas, 1,2s entre elas. */
+    function round(n, total){
+      return fjPagedR(adsetsUrl()).then(function(cur){
+        var act = (cur || []).filter(isActiveSet);
+        var tot = act.length || total;
+        var pend = act.filter(function(s){ return !hasCap(s.lifetime_spend_cap); });
+        var okN = tot - pend.length;
+        if (btn) btn.textContent = okN + '/' + tot;
+        if (!pend.length || n >= 3) return { okN: okN, total: tot, sets: act, pend: pend };
+        return fixPending(pend).then(function(){ return new Promise(function(r){ setTimeout(r, 1200); }); }).then(function(){ return round(n + 1, tot); });
+      });
+    }
+    fjPagedR(adsetsUrl()).then(function(list){
+      var actSets = (list || []).filter(isActiveSet);
+      if (!actSets.length) { notifyErr('Sem conjunto ativo em "' + camp.name + '"', 'Não achei conjunto ativo. Recarregue as campanhas.'); restore(); return; }
+      var total = actSets.length;
+      if (!confirm('Setar LIMITE DE GASTO $' + val + ' em TODOS os ' + total + ' conjunto(s) ativo(s) de "' + camp.name + '"?\n\nÉ o teto TOTAL de gasto de CADA conjunto. Se algum já gastou perto disso, a Meta sobe o teto p/ o mínimo permitido.')) { restore(); return; }
+      return batchApply(actSets.map(function(s){ return s.id; })).then(function(){ return round(0, total); }).then(function(res){
+        syncDisplay(res.sets); /* atualiza o display c/ o valor REAL lido */
+        camp._hasCap = true;
+        /* algum conjunto ficou ACIMA do pedido (minimo exigido pela Meta)? avisa. */
+        var bumped = (res.sets || []).filter(function(s){ return s.lifetime_spend_cap != null && parseInt(s.lifetime_spend_cap) > cents + 1; }).length;
+        if (res.okN >= res.total) {
+          notifyOk('Limite de gasto $' + val + ' em "' + camp.name + '"', res.okN + '/' + res.total + ' conjunto(s) · via Batch' + (bumped ? ' · ' + bumped + ' subiu(ram) p/ o mínimo permitido' : ''));
+          try { logRuleHist(camp, 'LIMITAR_GASTO', 'Limite de gasto → $' + val + ' (' + res.okN + ' conjunto(s))', { dailyOld: null, dailyNew: null, endOld: null, endNew: null }); } catch (e) {}
+          closeCboDetail();
+          renderCBO();
+        } else {
+          var amostra = (res.pend || []).slice(0, 3).map(function(s){ return (s.name || s.id) + ' ($' + (s.lifetime_spend_cap != null ? Math.round(parseInt(s.lifetime_spend_cap)/100) : '?') + ')'; }).join(', ');
+          var tokenBad = /application has been deleted|access token|OAuth|code 190|session/i.test(lastErr);
+          notifyErr('Limite de gasto: ' + res.okN + '/' + res.total + ' em "' + camp.name + '"', 'Ficaram: ' + (amostra || '?') + (res.pend.length > 3 ? ' …+' + (res.pend.length - 3) : '') + '. ' + (lastErr || '') + (tokenBad ? ' TOKEN INVÁLIDO.' : ''));
+          renderCBO();
+          restore();
+        }
+      });
+    }).catch(function(e){
+      notifyErr('Erro ao buscar conjuntos de "' + camp.name + '"', (e && e.message ? e.message : String(e)));
+      restore();
+    });
+  }
+
+  /* REMOVER o limite de gasto: sobe o teto p/ o ORCAMENTO TOTAL da campanha (= sem limite na pratica;
+     o conjunto nunca passa do orcamento da campanha). Nao da p/ "zerar" (a Meta le 0 como teto $0). */
+  function removeSpendCap(i) {
+    var camp = cboData[i];
+    if (!camp) return;
+    var lbCents = parseInt(camp.lifetime_budget) || 0;
+    var noCap = lbCents > 0 ? lbCents : 100000000; /* fallback $1.000.000 */
+    var capped = (camp._adsets || []).filter(function(s){ return (s.effective_status||'').toUpperCase()==='ACTIVE' && s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0 && +s.lifetime_spend_cap < noCap; });
+    if (!capped.length) { alert('Nenhum conjunto ativo com limite para remover.'); return; }
+    if (!confirm('REMOVER o limite de gasto de "' + camp.name + '"?\nO teto sobe p/ o orçamento total ($' + Math.round(noCap/100).toLocaleString('pt-BR') + ') = sem limite na prática. ' + capped.length + ' conjunto(s).')) return;
+    var btn = document.getElementById('detCapSave');
+    if (btn) { btn.disabled = true; btn.textContent = 'Removendo…'; }
+    Promise.all(capped.map(function(s){ return capAdset(camp._tk, s.id, noCap); })).then(function(){
+      camp._hasCap = false;
+      (camp._adsets || []).forEach(function(s){ if ((s.effective_status||'').toUpperCase()==='ACTIVE') s.lifetime_spend_cap = noCap; });
+      notifyOk('Limite REMOVIDO de "' + camp.name + '"', capped.length + ' conjunto(s) liberado(s) — a campanha volta a rodar sem teto.');
+      closeCboDetail();
+      renderCBO();
+    }).catch(function(e){ notifyErr('Erro ao REMOVER limite de "' + camp.name + '"', e && e.message ? e.message : ''); if (btn) { btn.disabled = false; btn.textContent = 'Aplicar'; } });
   }
 
   function calcCBORow(i, source) {
