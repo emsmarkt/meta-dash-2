@@ -422,7 +422,8 @@ html,body{background:#fbfcfd!important}
     minSpendJudge: 100,  // so julga campanha apos esse gasto no dia (US$)
     floorDaily: 85,      // piso (so usado como fallback)
     cutDays: 364,        // CORTAR = empurra o termino p/ daqui X dias (limite do FB e 365)
-    cpaTarget: 175,      // teto de CPA = META de ROAS (175 -> ROAS 1.5)
+    commission: 120,     // COMISSAO por venda (US$). Usada SO nas estimativas de ROAS por venda (7d, meta, por conta). Faturamento/ROAS principais usam a receita REAL do RedTrack.
+    cpaTarget: 80,       // teto de CPA = META de ROAS (comissao 120 / 80 -> ROAS 1.5)
     cpaRopeGood: 190,    // teto de CPA extra em DIA BOM p/ quem ja vende (2+) -> ROAS ~1.37
     /* ROAS de corte: abaixo disso -> CORTAR (+364 dias), independente do dia.
        Entre minRoas (1.3) e a meta (1.5) -> LIMITA no gasto. >= 1.5 -> escala. */
@@ -514,11 +515,10 @@ html,body{background:#fbfcfd!important}
   function getRtICType() { try { return localStorage.getItem('rt_ictype') || '2'; } catch(e) { return '2'; } }
   function saveRtICType(v) { try { if (v) localStorage.setItem('rt_ictype', v); else localStorage.removeItem('rt_ictype'); } catch(e) {} }
   function hasConv() { return !!(getRtTk() || getUtmTk()); }
-  /* FATURAMENTO = receita REAL, direto da fonte (sem multiplicar). RedTrack: coluna "Revenue" vem em R$ ->
-     converte p/ US$ (/ cambio). UTMify: valor das ordens (usado como esta). */
+  /* FATURAMENTO = receita REAL, direto da fonte (sem multiplicar). RedTrack: coluna "Revenue" JÁ VEM EM USD
+     (mudança SET/2026) -> usa DIRETO, NÃO divide por câmbio. UTMify: valor das ordens (USD, direto). */
   function campFat(c) {
     var cv = c && c._conv; if (!cv) return 0;
-    if (cv.src === 'rt') { var fx = getFx(); return fx > 0 ? (cv.revenue || 0) / fx : (cv.revenue || 0); }
     return cv.revenue || 0;
   }
   /* URL do Worker (Cloudflare) FIXA no codigo — igual p/ todos que acessam (nao pede a cada um).
@@ -1131,8 +1131,8 @@ html,body{background:#fbfcfd!important}
   /* ── Conversoes: prioriza RedTrack, cai para Utmify ── */
   function fetchConversions(camps) {
     camps.forEach(function(c){ c._conv = null; });
-    /* FONTE DE VENDAS por INSTANCIA: dash principal -> RedTrack (venda x $260); instancia isolada -> UTMify
-       (faturamento = valor real das ordens). O outro token, se existir, e so fallback. */
+    /* FONTE DE VENDAS por INSTANCIA: dash principal -> RedTrack (faturamento = coluna Revenue REAL); instancia
+       isolada -> UTMify (faturamento = valor real das ordens). O outro token, se existir, e so fallback. */
     if (ISOLATED) {
       if (getUtmTk()) return fetchUtmify(camps).catch(function(){ return getRtTk() ? fetchRedTrack(camps) : null; });
       if (getRtTk()) return fetchRedTrack(camps);
@@ -1234,7 +1234,7 @@ html,body{background:#fbfcfd!important}
         });
         camps.forEach(function(c) {
           var v = by[String(c.id)];
-          if (v && v.cost > 0) { var spUsd = v.cost / fx; c._roas7d = spUsd > 0 ? (v.sales*260)/spUsd : 0; }
+          if (v && v.cost > 0) { var spUsd = v.cost; c._roas7d = spUsd > 0 ? (v.sales*RULES.commission)/spUsd : 0; } /* RedTrack cost JÁ em USD (não divide por câmbio) */
         });
       })
       .catch(function(){});
@@ -1330,8 +1330,8 @@ html,body{background:#fbfcfd!important}
           rows.forEach(function(row) {
             var h = parseInt(row.hour_of_day, 10);
             if (isNaN(h) || h < 0 || h > 23) return;
-            var costRs = parseFloat(row.cost) || 0;
-            costH[h] += costRs / fx; /* R$ -> US$ */
+            var costUsd = parseFloat(row.cost) || 0;
+            costH[h] += costUsd; /* RedTrack cost JÁ em USD (não divide por câmbio) */
           });
           var cum = new Array(24); var acc = 0;
           for (i = 0; i < 24; i++) { acc += costH[i]; cum[i] = acc; }
@@ -1892,7 +1892,7 @@ html,body{background:#fbfcfd!important}
     });
   }
 
-  /* Sugestao de orcamento diario com base no ROAS (faturamento = vendas x $260). */
+  /* Sugestao de orcamento diario com base no ROAS (faturamento REAL do RedTrack; comissao ~$120/venda nas estimativas). */
   function suggestBudget(roas, sales, spend) {
     if ((!sales || sales === 0) && spend >= 110) return { txt:'Orcamento $100', cls:'d-bad' };
     if (roas <= 0) return { txt:'---', cls:'' };
@@ -1971,7 +1971,7 @@ html,body{background:#fbfcfd!important}
     var rem = remainingOf(camp);
     var target = null, action = '', cls = 'd-warn', key = '';
     var roasFmt = roas.toFixed(2).replace('.', ',');                       /* ROAS de hoje */
-    var metaRoasTxt = (260 / RULES.cpaTarget).toFixed(1).replace('.', ','); /* meta de ROAS (ex: 1,5) */
+    var metaRoasTxt = (RULES.commission / RULES.cpaTarget).toFixed(1).replace('.', ','); /* meta de ROAS (ex: 1,5) */
     /* CORTAR = REDUZIR RITMO: empurra o termino p/ daqui cutDays (364 ~ 1 ano). O diario vira saldo/364.
        Freio GENTIL, sem catch-up/dump (o antigo limite de gasto foi APOSENTADO). */
     var cortarEnd = brDatePlus(RULES.cutDays);
@@ -2596,7 +2596,7 @@ html,body{background:#fbfcfd!important}
             var h = hourBR(ms);
             var gAcc = cumCost[h] || 0;        /* US$ acumulado ate o fim da hora da venda */
             var vAcc = k + 1;                  /* nº de vendas ate aqui (inclusive) */
-            var rAcc = gAcc > 0 ? (vAcc * 260) / gAcc : 0;
+            var rAcc = gAcc > 0 ? (vAcc * RULES.commission) / gAcc : 0;
             var roasCls = rAcc >= 1.5 ? 'd-good' : (rAcc >= 1.3 ? 'd-warn' : (rAcc > 0 ? 'd-bad' : ''));
             rowsTip += '<div class="sale-row">'
                      + '<span class="sale-h">'+hhmmBR(ms)+'</span>'
