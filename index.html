@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-23.6</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-23.8</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -217,6 +217,14 @@ html,body{background:#fbfcfd!important}
       </label>
       <button class="btn" id="btnPauseAllCBO" title="PAUSA todas as campanhas com CBO no nome que estão ativas (em massa, no Meta)" style="border-color:#cf222e;color:#cf222e">&#9208; Pausar tudo (CBO)</button>
       <button class="btn" id="btnActivateAllCBO" title="ATIVA todas as campanhas CBO que estão pausadas (em massa, no Meta)" style="border-color:#1a7f37;color:#1a7f37">&#9654; Ativar tudo (CBO)</button>
+      <span id="madGlobWrap" title="Limite de gasto na MADRUGADA (00:00–07:00 BR) para TODAS as campanhas ativas. O robô aplica à meia-noite e remove de manhã, sozinho. Exclua campanhas específicas no detalhe delas." style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#57606a;padding:4px 8px;border:1px solid #8250df;border-radius:6px">
+        <span style="font-weight:600;color:#8250df">🌙 Madrugada (todas):</span>
+        <span style="color:#656d76">$</span>
+        <input class="cbo-inp" id="madGlobInp" type="number" min="1" step="any" placeholder="ex: 30" style="width:56px;text-align:right">
+        <button class="save-btn" id="madGlobApply" style="background:#8250df;border-color:#8250df;padding:5px 9px">Aplicar a todas</button>
+        <span id="madGlobTxt" style="font-weight:600;color:#8250df"></span>
+        <a href="#" id="madGlobOff" style="color:#cf222e;font-size:11px;display:none">desligar</a>
+      </span>
     </div>
     <div class="tbl-wrap">
       <table>
@@ -584,6 +592,42 @@ html,body{background:#fbfcfd!important}
     var u = getWkUrl();
     if (!u) { appliedShared = {}; return Promise.resolve(); }
     return fetch(u + '/applied').then(function(r){ return r.json(); }).then(function(m){ appliedShared = (m && typeof m === 'object') ? m : {}; }).catch(function(){ appliedShared = {}; });
+  }
+  /* CONFIG do LIMITE DE MADRUGADA (do worker). madGlobal={v,en} vale p/ TODAS as ativas; madCfg={campId:{v,en}}
+     são exceções (en:false EXCLUI a campanha; v>0 valor próprio). O robô aplica 00:00 e remove 07:00. */
+  var madGlobal = {}, madCfg = {};
+  function fetchMadrugada() {
+    var u = getWkUrl();
+    if (!u) { madGlobal = {}; madCfg = {}; return Promise.resolve(); }
+    return fetch(u + '/madrugada').then(function(r){ return r.json(); }).then(function(m){
+      madGlobal = (m && m.global && typeof m.global === 'object') ? m.global : {};
+      madCfg = (m && m.camps && typeof m.camps === 'object') ? m.camps : {};
+    }).catch(function(){ madGlobal = {}; madCfg = {}; });
+  }
+  /* valor EFETIVO da madrugada p/ uma campanha (override tem prioridade; en:false = excluída = 0). */
+  function madValueFor(camp) {
+    var ov = madCfg[camp.id];
+    if (ov) { if (ov.en === false) return 0; if (ov.v > 0) return ov.v; }
+    if (madGlobal && madGlobal.en && madGlobal.v > 0) return madGlobal.v;
+    return 0;
+  }
+  function madExcluded(camp) { var ov = madCfg[camp.id]; return !!(ov && ov.en === false); }
+  /* Salva o GLOBAL (todas as campanhas). */
+  function saveMadrugadaGlobal(value, enabled) {
+    var u = getWkUrl();
+    if (!u) { notifyErr('Sem robô nesta instância', 'A madrugada é aplicada pelo robô (só no dash principal).'); return Promise.resolve(); }
+    return fetch(u + '/madrugada', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ global: true, v: value, en: enabled }) })
+      .then(function(r){ return r.json(); }).then(function(res){ if (res){ if(res.global) madGlobal = res.global; if(res.camps) madCfg = res.camps; } return res; });
+  }
+  /* Salva/exclui a EXCEÇÃO de uma campanha. mode: 'exclude' (não limita), 'value' (valor próprio), 'clear' (volta ao global). */
+  function saveMadrugadaCamp(campId, campName, mode, value) {
+    var u = getWkUrl();
+    if (!u) { notifyErr('Sem robô nesta instância', 'A madrugada é aplicada pelo robô (só no dash principal).'); return Promise.resolve(); }
+    var payload = mode === 'clear' ? { id: campId, remove: true }
+                : mode === 'exclude' ? { id: campId, en: false, v: 0, name: campName }
+                : { id: campId, en: true, v: value, name: campName };
+    return fetch(u + '/madrugada', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) })
+      .then(function(r){ return r.json(); }).then(function(res){ if (res){ if(res.global) madGlobal = res.global; if(res.camps) madCfg = res.camps; } return res; });
   }
   function setSpin(on) { var el = document.getElementById('spinIco'); if (el) el.style.display = on ? 'inline-block' : 'none'; }
   function fj(url) { return fetch(url).then(function(r) { return r.json(); }); }
@@ -1661,11 +1705,13 @@ html,body{background:#fbfcfd!important}
           });
           /* Estado compartilhado de regras aplicadas. (Aviso de 3 dias removido.) */
           return Promise.all([
-            fetchAppliedShared()
+            fetchAppliedShared(),
+            fetchMadrugada()
           ]).then(function(){
             /* RENDERIZA JA (nao trava a tela). A confirmacao dos "suspeitos" roda em SEGUNDO PLANO e
                re-renderiza quando terminar -> dash rapido + o falso "SEM ANUNCIO" some logo depois. */
             cboData = camps; renderCBO();
+            if (window.renderMadGlobal) window.renderMadGlobal(); /* reflete a config de madrugada carregada */
             var sp = document.getElementById('spinCBO'); if (sp) sp.style.display='none';
             confirmEmptyAds(camps).then(function(){
               if (cboData !== camps) return;
@@ -3010,6 +3056,27 @@ html,body{background:#fbfcfd!important}
           + '<button id="detCapRemove" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.02em;color:#fff;background:#cf222e;border:none;border-radius:6px;padding:6px 12px;cursor:pointer" title="Remover o limite de gasto (volta a rodar sem teto)">Remover limite</button>'
           + '</div>';
 
+    /* 🌙 LIMITE DE MADRUGADA (automatico pelo robo). O GLOBAL (todas) fica na barra da aba CBO.
+       Aqui é só o status DESTA campanha + exceção: EXCLUIR (não limita) ou VALOR PRÓPRIO. */
+    if (!ISOLATED) {
+      var globOn = !!(madGlobal && madGlobal.en && madGlobal.v > 0);
+      var thisExc = madExcluded(camp);
+      var thisV = madValueFor(camp);
+      var ovNow = madCfg[camp.id];
+      var hasOwn = !!(ovNow && ovNow.en !== false && ovNow.v > 0);
+      var statusTxt = thisExc ? 'FORA da madrugada' : (thisV > 0 ? ('máx $' + Math.round(thisV) + (hasOwn ? ' (próprio)' : ' (global)')) : 'sem limite');
+      body += '<div class="det-row" style="align-items:center;border-top:1px dashed #e4e8ee;padding-top:10px;margin-top:6px"><span class="det-k">🌙 Madrugada</span>'
+            + '<span class="det-v" style="display:flex;align-items:center;gap:6px;justify-content:flex-end">'
+            + '<span style="font-size:11px;font-weight:600;color:' + (thisExc ? '#656d76' : (thisV > 0 ? '#8250df' : '#656d76')) + '">' + statusTxt + '</span>'
+            + '<span style="font-size:11px;color:#656d76">$</span>'
+            + '<input class="cbo-inp" id="detMadInp" type="number" min="1" step="any" value="' + (hasOwn ? Math.round(ovNow.v) : '') + '" placeholder="' + (globOn ? Math.round(madGlobal.v) : '30') + '" style="width:64px" title="Valor PRÓPRIO desta campanha (sobrepõe o global).">'
+            + '<button class="save-btn" id="detMadSave" style="padding:5px 10px;background:#8250df;border-color:#8250df" title="Usar um valor próprio nesta campanha">Salvar</button>'
+            + '</span></div>'
+            + '<div style="font-size:10px;color:#656d76;text-align:right;margin-top:-3px">global (todas): ' + (globOn ? ('máx $' + Math.round(madGlobal.v)) : 'desligado') + ' · '
+            + (thisExc ? '<a href="#" id="detMadInclude" style="color:#1a7f37">incluir de novo</a>' : '<a href="#" id="detMadExclude" style="color:#cf222e">excluir esta da madrugada</a>')
+            + (hasOwn ? ' · <a href="#" id="detMadClear" style="color:#0969da">voltar ao global</a>' : '') + '</div>';
+    }
+
     /* Sugestao de regra: reaproveita o HTML ja renderizado na celula da tabela. */
     var sugCell = document.getElementById('sugcell_'+i);
     if (sugCell && sugCell.innerHTML.trim()) {
@@ -3047,6 +3114,37 @@ html,body{background:#fbfcfd!important}
     if (capRem) capRem.addEventListener('click', function(e){ e.preventDefault(); removeSpendCap(i); });
     var detLimNow = document.getElementById('detLimitNow');
     if (detLimNow) detLimNow.addEventListener('click', function(e){ e.preventDefault(); limitSpendNow(i); });
+    var detMadSave = document.getElementById('detMadSave');
+    if (detMadSave) detMadSave.addEventListener('click', function(){
+      var mi = document.getElementById('detMadInp'); var mv = mi ? parseFloat(mi.value) : 0;
+      if (!(mv > 0)) { alert('Digite o valor PRÓPRIO (US$) desta campanha. Ex: 30'); return; }
+      detMadSave.disabled = true; detMadSave.textContent = '…';
+      saveMadrugadaCamp(camp.id, camp.name, 'value', mv).then(function(){
+        notifyOk('Madrugada (própria) em "' + camp.name + '"', 'Máx $' + mv + ' só nesta campanha (sobrepõe o global).');
+        closeCboDetail(); renderCBO();
+      }).catch(function(e){ detMadSave.disabled = false; detMadSave.textContent = 'Salvar'; notifyErr('Erro ao salvar madrugada', e && e.message ? e.message : ''); });
+    });
+    var detMadExc = document.getElementById('detMadExclude');
+    if (detMadExc) detMadExc.addEventListener('click', function(e){ e.preventDefault();
+      saveMadrugadaCamp(camp.id, camp.name, 'exclude').then(function(){
+        notifyOk('"' + camp.name + '" FORA da madrugada', 'Esta campanha não será limitada na madrugada (roda livre).');
+        closeCboDetail(); renderCBO();
+      }).catch(function(err){ notifyErr('Erro ao excluir da madrugada', err && err.message ? err.message : ''); });
+    });
+    var detMadInc = document.getElementById('detMadInclude');
+    if (detMadInc) detMadInc.addEventListener('click', function(e){ e.preventDefault();
+      saveMadrugadaCamp(camp.id, camp.name, 'clear').then(function(){
+        notifyOk('"' + camp.name + '" INCLUÍDA na madrugada', 'Volta a seguir o limite global da madrugada.');
+        closeCboDetail(); renderCBO();
+      }).catch(function(err){ notifyErr('Erro ao incluir na madrugada', err && err.message ? err.message : ''); });
+    });
+    var detMadClr = document.getElementById('detMadClear');
+    if (detMadClr) detMadClr.addEventListener('click', function(e){ e.preventDefault();
+      saveMadrugadaCamp(camp.id, camp.name, 'clear').then(function(){
+        notifyOk('"' + camp.name + '" voltou ao global', 'Usa o valor global da madrugada.');
+        closeCboDetail(); renderCBO();
+      }).catch(function(err){ notifyErr('Erro', err && err.message ? err.message : ''); });
+    });
 
     m.classList.add('show');
   }
@@ -3625,7 +3723,10 @@ html,body{background:#fbfcfd!important}
       : (isCapped ? '🔒 LIMITADA' : 'sem limite');
     var remembered = getDayCap(camp); /* ultimo "rodar hoje" salvo */
     var preVal = remembered > 0 ? Math.round(remembered) : '';
+    var madV = ISOLATED ? 0 : madValueFor(camp);      /* valor efetivo (global ou exceção) */
+    var madExc = !ISOLATED && madExcluded(camp);       /* excluída da madrugada */
     return '<div style="display:flex;flex-direction:column;gap:3px;min-width:104px">'
+      + (madExc ? '<span style="font-size:9px;font-weight:700;color:#656d76" title="Excluída do limite de madrugada">🌙 madrugada: fora</span>' : (madV > 0 ? '<span style="font-size:9px;font-weight:700;color:#8250df" title="Robô limita na madrugada (00:00–07:00 BR)">🌙 madrugada máx $' + Math.round(madV) + '</span>' : ''))
       + '<span style="font-size:9px;color:#0969da;text-transform:uppercase;letter-spacing:.03em" title="quanto você quer rodar HOJE — o teto vira o gasto atual + esse valor">Rodar hoje</span>'
       + '<div style="display:flex;align-items:center;gap:3px">'
       + '<span style="font-size:11px;color:#656d76">$</span>'
@@ -3984,6 +4085,37 @@ html,body{background:#fbfcfd!important}
   }
   document.getElementById('btnPauseAllCBO').addEventListener('click', function() { bulkCBOStatus('PAUSED'); });
   document.getElementById('btnActivateAllCBO').addEventListener('click', function() { bulkCBOStatus('ACTIVE'); });
+  /* MADRUGADA GLOBAL (todas as campanhas): $ que o robô limita na madrugada (00:00–07:00 BR). */
+  (function(){
+    var wrap = document.getElementById('madGlobWrap');
+    if (!wrap) return;
+    if (ISOLATED) { wrap.style.display = 'none'; return; } /* dash 2 não tem robô */
+    window.renderMadGlobal = function(){
+      var inp = document.getElementById('madGlobInp'), txt = document.getElementById('madGlobTxt'), off = document.getElementById('madGlobOff');
+      var on = !!(madGlobal && madGlobal.en && madGlobal.v > 0);
+      if (txt) txt.textContent = on ? ('ATIVO: máx $' + Math.round(madGlobal.v) + '/madrugada em todas') : 'desligado';
+      if (off) off.style.display = on ? 'inline' : 'none';
+      if (inp && on && !inp.value) inp.value = Math.round(madGlobal.v);
+    };
+    var apply = document.getElementById('madGlobApply');
+    if (apply) apply.addEventListener('click', function(){
+      var inp = document.getElementById('madGlobInp'); var v = inp ? parseFloat(inp.value) : 0;
+      if (!(v > 0)) { alert('Digite o máximo (US$) da madrugada p/ TODAS. Ex: 30'); return; }
+      if (!confirm('Aplicar limite de madrugada de $' + v + ' em TODAS as campanhas ativas?\nO robô limita à 00:00 e remove às 07:00 (BR), toda noite.\n(Exclua campanhas específicas no detalhe delas.)')) return;
+      apply.disabled = true; apply.textContent = '…';
+      saveMadrugadaGlobal(v, true).then(function(){
+        apply.disabled = false; apply.textContent = 'Aplicar a todas';
+        window.renderMadGlobal(); renderCBO();
+        notifyOk('Madrugada ATIVADA em todas', 'Máx $' + v + ' na madrugada (00:00–07:00 BR). O robô aplica e remove sozinho. Precisa do robô em LIVE.');
+      }).catch(function(e){ apply.disabled = false; apply.textContent = 'Aplicar a todas'; notifyErr('Erro ao salvar madrugada global', e && e.message ? e.message : ''); });
+    });
+    var off = document.getElementById('madGlobOff');
+    if (off) off.addEventListener('click', function(e){ e.preventDefault();
+      if (!confirm('DESLIGAR o limite de madrugada de TODAS as campanhas?')) return;
+      saveMadrugadaGlobal(0, false).then(function(){ window.renderMadGlobal(); renderCBO(); notifyOk('Madrugada DESLIGADA', 'Nenhuma campanha será limitada na madrugada pelo robô.'); });
+    });
+    window.renderMadGlobal();
+  })();
   /* INTERRUPTOR LIVE/DRY do robo: ON = robo APLICA de verdade (APPLY_MODE=live via KV);
      OFF = robo so simula (dry). Le/grava a chave `applyMode` no Worker (vence o wrangler, sobrevive a deploy). */
   (function(){
