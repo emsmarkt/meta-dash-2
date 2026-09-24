@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-23.8</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-23.9</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -217,7 +217,7 @@ html,body{background:#fbfcfd!important}
       </label>
       <button class="btn" id="btnPauseAllCBO" title="PAUSA todas as campanhas com CBO no nome que estão ativas (em massa, no Meta)" style="border-color:#cf222e;color:#cf222e">&#9208; Pausar tudo (CBO)</button>
       <button class="btn" id="btnActivateAllCBO" title="ATIVA todas as campanhas CBO que estão pausadas (em massa, no Meta)" style="border-color:#1a7f37;color:#1a7f37">&#9654; Ativar tudo (CBO)</button>
-      <span id="madGlobWrap" title="Limite de gasto na MADRUGADA (00:00–07:00 BR) para TODAS as campanhas ativas. O robô aplica à meia-noite e remove de manhã, sozinho. Exclua campanhas específicas no detalhe delas." style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#57606a;padding:4px 8px;border:1px solid #8250df;border-radius:6px">
+      <span id="madGlobWrap" title="Limite de gasto na MADRUGADA (a partir de 00:00 BR) para TODAS as campanhas ativas. O robô só APLICA o teto (à meia-noite); você REMOVE de manhã manualmente no dash. Exclua campanhas específicas no detalhe delas." style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#57606a;padding:4px 8px;border:1px solid #8250df;border-radius:6px">
         <span style="font-weight:600;color:#8250df">🌙 Madrugada (todas):</span>
         <span style="color:#656d76">$</span>
         <input class="cbo-inp" id="madGlobInp" type="number" min="1" step="any" placeholder="ex: 30" style="width:56px;text-align:right">
@@ -594,7 +594,7 @@ html,body{background:#fbfcfd!important}
     return fetch(u + '/applied').then(function(r){ return r.json(); }).then(function(m){ appliedShared = (m && typeof m === 'object') ? m : {}; }).catch(function(){ appliedShared = {}; });
   }
   /* CONFIG do LIMITE DE MADRUGADA (do worker). madGlobal={v,en} vale p/ TODAS as ativas; madCfg={campId:{v,en}}
-     são exceções (en:false EXCLUI a campanha; v>0 valor próprio). O robô aplica 00:00 e remove 07:00. */
+     são exceções (en:false EXCLUI a campanha; v>0 valor próprio). O robô SÓ APLICA à 00:00 (você remove manual). */
   var madGlobal = {}, madCfg = {};
   function fetchMadrugada() {
     var u = getWkUrl();
@@ -3726,7 +3726,7 @@ html,body{background:#fbfcfd!important}
     var madV = ISOLATED ? 0 : madValueFor(camp);      /* valor efetivo (global ou exceção) */
     var madExc = !ISOLATED && madExcluded(camp);       /* excluída da madrugada */
     return '<div style="display:flex;flex-direction:column;gap:3px;min-width:104px">'
-      + (madExc ? '<span style="font-size:9px;font-weight:700;color:#656d76" title="Excluída do limite de madrugada">🌙 madrugada: fora</span>' : (madV > 0 ? '<span style="font-size:9px;font-weight:700;color:#8250df" title="Robô limita na madrugada (00:00–07:00 BR)">🌙 madrugada máx $' + Math.round(madV) + '</span>' : ''))
+      + (madExc ? '<span style="font-size:9px;font-weight:700;color:#656d76" title="Excluída do limite de madrugada">🌙 madrugada: fora</span>' : (madV > 0 ? '<span style="font-size:9px;font-weight:700;color:#8250df" title="Robô limita a partir de 00:00 BR (você remove de manhã manual)">🌙 madrugada máx $' + Math.round(madV) + '</span>' : ''))
       + '<span style="font-size:9px;color:#0969da;text-transform:uppercase;letter-spacing:.03em" title="quanto você quer rodar HOJE — o teto vira o gasto atual + esse valor">Rodar hoje</span>'
       + '<div style="display:flex;align-items:center;gap:3px">'
       + '<span style="font-size:11px;color:#656d76">$</span>'
@@ -4101,12 +4101,12 @@ html,body{background:#fbfcfd!important}
     if (apply) apply.addEventListener('click', function(){
       var inp = document.getElementById('madGlobInp'); var v = inp ? parseFloat(inp.value) : 0;
       if (!(v > 0)) { alert('Digite o máximo (US$) da madrugada p/ TODAS. Ex: 30'); return; }
-      if (!confirm('Aplicar limite de madrugada de $' + v + ' em TODAS as campanhas ativas?\nO robô limita à 00:00 e remove às 07:00 (BR), toda noite.\n(Exclua campanhas específicas no detalhe delas.)')) return;
+      if (!confirm('Aplicar limite de madrugada de $' + v + ' em TODAS as campanhas ativas?\nO robô SÓ LIMITA à 00:00 (BR), toda noite. Você REMOVE de manhã manualmente no dash.\n(Exclua campanhas específicas no detalhe delas.)')) return;
       apply.disabled = true; apply.textContent = '…';
       saveMadrugadaGlobal(v, true).then(function(){
         apply.disabled = false; apply.textContent = 'Aplicar a todas';
         window.renderMadGlobal(); renderCBO();
-        notifyOk('Madrugada ATIVADA em todas', 'Máx $' + v + ' na madrugada (00:00–07:00 BR). O robô aplica e remove sozinho. Precisa do robô em LIVE.');
+        notifyOk('Madrugada ATIVADA em todas', 'Máx $' + v + ' a partir de 00:00 BR. O robô só LIMITA — você remove de manhã manual. Precisa do robô em LIVE.');
       }).catch(function(e){ apply.disabled = false; apply.textContent = 'Aplicar a todas'; notifyErr('Erro ao salvar madrugada global', e && e.message ? e.message : ''); });
     });
     var off = document.getElementById('madGlobOff');
