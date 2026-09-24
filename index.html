@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-23.9</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-24.1</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -3256,6 +3256,11 @@ html,body{background:#fbfcfd!important}
      = SEU proprio gasto + X (p/ 1 conjunto ativo = a campanha roda $X; p/ varios, cada um roda ate +$X). */
   function daycapKey(camp){ return 'md_daycap_' + camp.id; }
   function getDayCap(camp){ try { var v = parseFloat(localStorage.getItem(daycapKey(camp))); return (v > 0) ? v : 0; } catch(e){ return 0; } }
+  /* MARCA LOCAL de "campanha limitada por mim" (localStorage md_capd) — reforço p/ o selo LIMITADA quando os
+     conjuntos não vêm na recarga (rate limit). Reconciliado: se os conjuntos VÊM e não há teto, limpa a marca. */
+  function getCapMarks(){ try { var m = JSON.parse(localStorage.getItem('md_capd') || '{}'); return (m && typeof m === 'object') ? m : {}; } catch(e){ return {}; } }
+  function setCapMark(campId, on){ try { var m = getCapMarks(); if (on) m[campId] = Date.now(); else delete m[campId]; localStorage.setItem('md_capd', JSON.stringify(m)); } catch(e){} }
+  function isCapMarked(campId){ var m = getCapMarks(); return !!m[campId]; }
   /* "Limitar gasto agora": para no gasto ATUAL de cada conjunto ativo (teto = gasto atual). */
   function limitSpendNow(i) { runSpendCap(i, 0, true); }
   /* Aplica X (rodar hoje) lido do campo da LINHA (cspend_i) ou do DETALHE (detCapInp). */
@@ -3345,6 +3350,7 @@ html,body{background:#fbfcfd!important}
       return batchApply(actSets).then(function(){ return round(0, total); }).then(function(res){
         syncDisplay(res.sets);
         camp._hasCap = true;
+        if (res.okN > 0) setCapMark(camp.id, true); /* marca LOCAL: limitei -> selo LIMITADA sobrevive à recarga */
         if (!isStop && addX > 0) { try { localStorage.setItem(daycapKey(camp), String(addX)); } catch(e){} } /* LEMBRA o X p/ amanha */
         if (res.okN >= res.total) {
           if (isStop) notifyOk('PAROU "' + camp.name + '"', res.okN + '/' + res.total + ' conjunto(s) — teto no gasto atual');
@@ -3383,13 +3389,13 @@ html,body{background:#fbfcfd!important}
     fjPagedR(API + '/' + camp.id + '/adsets?fields=id,name,effective_status,lifetime_spend_cap&limit=500&access_token=' + useTk).then(function(list){
       var capped = (list || []).filter(function(s){ return (s.effective_status||'').toUpperCase()==='ACTIVE' && s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0 && (lbCents <= 0 || +s.lifetime_spend_cap < lbCents); });
       if (!capped.length) {
-        camp._hasCap = false;
+        camp._hasCap = false; setCapMark(camp.id, false);
         notifyOk('"' + camp.name + '" já está sem limite', 'Nenhum conjunto ativo com teto de gasto.');
         renderCBO();
         return;
       }
       return Promise.all(capped.map(function(s){ return capAdset(useTk, s.id, noCap); })).then(function(){
-        camp._hasCap = false;
+        camp._hasCap = false; setCapMark(camp.id, false);
         (camp._adsets || []).forEach(function(s){ if ((s.effective_status||'').toUpperCase()==='ACTIVE') s.lifetime_spend_cap = noCap; });
         notifyOk('Limite REMOVIDO de "' + camp.name + '"', capped.length + ' conjunto(s) liberado(s) — a campanha volta a rodar sem teto.');
         closeCboDetail();
@@ -3716,8 +3722,13 @@ html,body{background:#fbfcfd!important}
     var capsC = actSets.map(function(s){ return (s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0) ? +s.lifetime_spend_cap : null; }).filter(function(v){ return v != null; });
     var realCaps = capsC.filter(function(v){ return !(lbCents > 0 && v >= lbCents); }); /* teto >= orcamento total = sem limite */
     var uniq = realCaps.filter(function(v, ix, a){ return a.indexOf(v) === ix; });
-    /* LIMITADA = tem teto real em conjunto ativo (aplicado hoje OU ontem). Fallback _hasCap (calculado na carga). */
-    var isCapped = realCaps.length > 0 || !!camp._hasCap;
+    /* LIMITADA = teto real em conjunto ativo (do read) OU _hasCap OU marca LOCAL (limitei pelo painel).
+       RECONCILIA: se os conjuntos VIERAM (actSets.length>0) e NÃO há teto, é remoção real -> limpa a marca.
+       Se os conjuntos NÃO vieram (rate limit), confia na marca local -> selo continua aparecendo. */
+    var adsetsLoaded = actSets.length > 0;
+    var marked = isCapMarked(camp.id);
+    if (adsetsLoaded && realCaps.length === 0 && !camp._hasCap) { if (marked) { setCapMark(camp.id, false); marked = false; } }
+    var isCapped = realCaps.length > 0 || !!camp._hasCap || marked;
     var tetoTxt = realCaps.length
       ? ('🔒 LIMITADA · teto ' + (uniq.length === 1 ? fmtUSD(uniq[0]/100) : (fmtUSD(Math.min.apply(null,realCaps)/100) + '–' + fmtUSD(Math.max.apply(null,realCaps)/100))))
       : (isCapped ? '🔒 LIMITADA' : 'sem limite');
