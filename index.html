@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-25.1</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-25.2</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -3744,8 +3744,9 @@ html,body{background:#fbfcfd!important}
       var nm = strat === 'LOWEST_COST_WITH_MIN_ROAS' ? 'Meta de ROAS' : 'Maior volume';
       return '<span style="font-size:10px;color:#656d76" title="Estratégia sem limite de lance/custo — edite no gerenciador">' + nm + '</span>';
     }
+    /* Mostra o input SEMPRE (como a coluna de gasto). Se os conjuntos ainda não carregaram, o "Aplicar"
+       busca os conjuntos FRESCOS na hora (applyBidCap lê da API) — então não precisa esconder com "—". */
     var actSets = (camp._adsets || []).filter(function(s){ return (s.effective_status || '').toUpperCase() === 'ACTIVE'; });
-    if (!actSets.length) return '<span style="font-size:11px;color:#656d76">—</span>';
     var bidsC = actSets.map(function(s){ return (s.bid_amount != null && +s.bid_amount > 0) ? +s.bid_amount : null; }).filter(function(v){ return v != null; });
     var uniqB = bidsC.filter(function(v, ix, a){ return a.indexOf(v) === ix; });
     var cur = bidsC.length ? (uniqB.length === 1 ? fmtUSD(uniqB[0]/100) : (fmtUSD(Math.min.apply(null,bidsC)/100) + '–' + fmtUSD(Math.max.apply(null,bidsC)/100))) : 'sem valor';
