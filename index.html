@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-24.7</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-25.1</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -595,15 +595,19 @@ html,body{background:#fbfcfd!important}
   }
   /* CONFIG do LIMITE DE MADRUGADA (do worker). madGlobal={v,en} vale p/ TODAS as ativas; madCfg={campId:{v,en}}
      são exceções (en:false EXCLUI a campanha; v>0 valor próprio). O robô SÓ APLICA às 23:30 (você remove manual). */
-  var madGlobal = {}, madCfg = {};
+  var madGlobal = {}, madCfg = {}, madOrigBud = {}; /* madOrigBud={campId:origCents} = orçamento original das VITALÍCIAS limitadas (p/ restaurar) */
   function fetchMadrugada() {
     var u = getWkUrl();
-    if (!u) { madGlobal = {}; madCfg = {}; return Promise.resolve(); }
+    if (!u) { madGlobal = {}; madCfg = {}; madOrigBud = {}; return Promise.resolve(); }
     return fetch(u + '/madrugada').then(function(r){ return r.json(); }).then(function(m){
       madGlobal = (m && m.global && typeof m.global === 'object') ? m.global : {};
       madCfg = (m && m.camps && typeof m.camps === 'object') ? m.camps : {};
-    }).catch(function(){ madGlobal = {}; madCfg = {}; });
+      madOrigBud = (m && m.origBud && typeof m.origBud === 'object') ? m.origBud : {};
+    }).catch(function(){ madGlobal = {}; madCfg = {}; madOrigBud = {}; });
   }
+  /* guarda/limpa no worker o orçamento ORIGINAL de uma vitalícia limitada (compartilhado). */
+  function saveOrigBud(campId, origCents) { var u = getWkUrl(); if (!u) return Promise.resolve(); return fetch(u + '/madrugada', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ origSet:true, id: campId, orig: origCents }) }).then(function(r){ return r.json(); }).then(function(res){ if (res && res.origBud) madOrigBud = res.origBud; }).catch(function(){}); }
+  function clearOrigBud(campId) { var u = getWkUrl(); if (!u) { delete madOrigBud[campId]; return Promise.resolve(); } return fetch(u + '/madrugada', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ origClear:true, id: campId }) }).then(function(r){ return r.json(); }).then(function(res){ if (res && res.origBud) madOrigBud = res.origBud; else delete madOrigBud[campId]; }).catch(function(){ delete madOrigBud[campId]; }); }
   /* valor EFETIVO da madrugada p/ uma campanha (override tem prioridade; en:false = excluída = 0). */
   function madValueFor(camp) {
     var ov = madCfg[camp.id];
@@ -1676,7 +1680,7 @@ html,body{background:#fbfcfd!important}
           var sumCaps = 0, anyCap = false;
           adsets.forEach(function(s) { var life = 0; if (s.insights && s.insights.data && s.insights.data[0]) life = parseFloat(s.insights.data[0].spend) || 0; s._life = life; var cap = (s.lifetime_spend_cap != null) ? +s.lifetime_spend_cap : 0; if (cap > 0) { anyCap = true; sumCaps += cap / 100; } });
           c._adsets = adsets;
-          c._hasCap = anyCap && sumCaps < Math.max((c._spend || 0) * 2, 20);
+          recomputeLifeCap(c); /* LIMITADA (vitalícia) = lê o lifetime_spend_cap real dos conjuntos ativos */
         });
       }).catch(function() {
         gr.camps.forEach(function(c){ c._spend = c._spend||0; c._periodSpend = c._periodSpend||0; c._clicks = c._clicks||0; c._cpc = c._cpc||0; c._adTotal = 0; c._adActive = 0; c._adsLoaded = false; c._adsErr = 'falha ao carregar a conta'; c._adsets = c._adsets||[]; c._hasCap = false; });
@@ -2041,7 +2045,9 @@ html,body{background:#fbfcfd!important}
     }
     /* LEGADO: o mecanismo de LIMITE DE GASTO foi APOSENTADO. Se a campanha ainda tiver cap (era antiga),
        oferece REMOVER LIMITE p/ ela voltar a rodar sob o lever de termino. */
-    if (camp._hasCap) {
+    /* O LIMITE DE GASTO agora é MANUAL (você aplica/remove pelos botões). A regra NÃO sugere mais remover
+       — senão ficava avisando toda campanha que você limitou de propósito. */
+    if (false && camp._hasCap) {
       return { action: 'REMOVER LIMITE (mecanismo aposentado — de volta ao termino)', cls: 'd-good', target: null, newEnd: null, key: 'REMLIMITE', sig: 'REMLIMITE' };
     }
     /* RESTAURAR: a ULTIMA mudanca de termino da campanha foi um CORTAR (+364d) e ela RECUPEROU
@@ -3282,38 +3288,78 @@ html,body{background:#fbfcfd!important}
     var restore = function(){ if (btn) { btn.disabled = false; btn.innerHTML = btnLabel; } };
     if (btn) { btn.disabled = true; btn.textContent = '…'; }
     var useTk = camp._tk;
-    /* MECANISMO: teto no NÍVEL DA CAMPANHA (spend_cap) = gasto TOTAL da campanha + addX (ou só o gasto atual,
-       se "parar agora"). O ad-set lifetime_spend_cap dava "Invalid parameter"; spend_cap da campanha é o campo
-       PADRÃO da Meta p/ limite de gasto total e funciona em orçamento DIÁRIO e vitalício. postForm traz o erro
-       detalhado da Meta (error_user_msg). Verifica lendo o spend_cap de volta. */
-    fjRetry(API + '/' + camp.id + '?fields=spend_cap,insights.date_preset(maximum){spend}&access_token=' + useTk).then(function(d){
+    var isLife = parseInt(camp.lifetime_budget) > 0; /* VITALÍCIO -> lifetime_budget; DIÁRIO -> spend_cap */
+    /* teto = gasto TOTAL da campanha + addX (ou só o gasto atual, se "parar agora"). */
+    fjRetry(API + '/' + camp.id + '?fields=spend_cap,lifetime_budget,insights.date_preset(maximum){spend}&access_token=' + useTk).then(function(d){
       if (d && d.error) { notifyErr('Erro ao ler a campanha "' + camp.name + '"', d.error.message || 'erro'); restore(); return; }
       var campSpend = (d && d.insights && d.insights.data && d.insights.data[0]) ? (parseFloat(d.insights.data[0].spend) || 0) : (camp._spend || 0);
       var capUsd = isStop ? Math.ceil(campSpend) : (campSpend + addX);
       var cents = Math.max(1, Math.round(capUsd * 100));
+      if (isLife) {
+        /* VITALÍCIA: NÃO mexe no orçamento. Aplica o LIMITE DE GASTO DO CONJUNTO (lifetime_spend_cap) nos
+           conjuntos ATIVOS, distribuindo o X. Cada conjunto: teto = gasto_do_conjunto + (X / nº ativos).
+           A soma dos tetos = gasto_total + X -> a campanha para em gasto+X SEM tocar no orçamento total. */
+        var lbCents = parseInt(camp.lifetime_budget) || 0;
+        return withTokenFallback(useTk, function(t){ return fjThrow(API + '/' + camp.id + '/adsets?fields=id,name,effective_status,lifetime_spend_cap,insights.date_preset(maximum){spend}&limit=200&access_token=' + t); })
+          .then(function(r){
+            useTk = r.tk; camp._tk = useTk;
+            var all = (r.result && r.result.data) || [];
+            var act = all.filter(function(s){ return (s.effective_status || '').toUpperCase() === 'ACTIVE'; });
+            if (!act.length) { notifyErr('Sem conjunto ativo em "' + camp.name + '"', 'Não há conjunto ATIVO p/ aplicar o limite de gasto.'); restore(); return; }
+            act.forEach(function(s){ var sp = 0; try { sp = (s.insights && s.insights.data && s.insights.data[0]) ? (parseFloat(s.insights.data[0].spend) || 0) : 0; } catch(e){} s._sp = sp; });
+            var sumAct = act.reduce(function(a, s){ return a + s._sp; }, 0);
+            var n = act.length, share = isStop ? 0 : (addX / n);
+            var confL = isStop
+              ? ('PARAR "' + camp.name + '" (vitalícia) agora?\nTrava o LIMITE DE GASTO do(s) ' + n + ' conjunto(s) ativo(s) no gasto atual (~$' + Math.round(sumAct) + '). O orçamento total ($' + Math.round(lbCents/100).toLocaleString('pt-BR') + ') NÃO muda.')
+              : ('Rodar +$' + addX + ' em "' + camp.name + '" (vitalícia)?\nO LIMITE DE GASTO do(s) ' + n + ' conjunto(s) ativo(s) vira gasto+$' + addX + ' (total ~$' + Math.round(sumAct + addX) + '). O orçamento total ($' + Math.round(lbCents/100).toLocaleString('pt-BR') + ') NÃO muda.\n(Amanhã é só clicar de novo — o valor fica salvo.)');
+            if (!confirm(confL)) { restore(); return; }
+            return Promise.all(act.map(function(s){
+              var capCents = isStop ? Math.max(1, Math.round(s._sp * 100)) : Math.max(1, Math.round((s._sp + share) * 100));
+              return capAdset(useTk, s.id, capCents).then(function(){ return { s: s, ok: true }; })
+                .catch(function(e){ return { s: s, ok: false, err: (e && e.message) ? e.message : String(e) }; });
+            })).then(function(results){
+              var okc = results.filter(function(x){ return x.ok; }).length;
+              var fail = results.filter(function(x){ return !x.ok; });
+              if (!okc) { notifyErr('Meta recusou o limite (vitalícia) de "' + camp.name + '"', (fail[0] && fail[0].err) || 'erro'); renderCBO(); restore(); return; }
+              /* VERIFICA lendo de volta -> selo LIMITADA na hora e VERDADEIRO */
+              return fjRetry(API + '/' + camp.id + '/adsets?fields=id,effective_status,lifetime_spend_cap&limit=200&access_token=' + useTk).then(function(v){
+                var byId = {}; ((v && v.data) || []).forEach(function(s){ byId[s.id] = s; });
+                (camp._adsets || []).forEach(function(s){ if (byId[s.id]) { s.lifetime_spend_cap = byId[s.id].lifetime_spend_cap; s.effective_status = byId[s.id].effective_status; } });
+                act.forEach(function(s){ if (byId[s.id] && (camp._adsets || []).indexOf(s) < 0) { s.lifetime_spend_cap = byId[s.id].lifetime_spend_cap; (camp._adsets = camp._adsets || []).push(s); } });
+                recomputeLifeCap(camp);
+                if (!camp._hasCap) { notifyErr('Meta NÃO gravou o limite de "' + camp.name + '"', 'o teto não ficou abaixo do orçamento. Tente de novo.'); renderCBO(); restore(); return; }
+                if (!isStop && addX > 0) { try { localStorage.setItem(daycapKey(camp), String(addX)); } catch(e){} }
+                var effTot = Math.round((camp._capTotalCents || 0) / 100);
+                notifyOk((isStop ? 'PAROU' : 'Limite (vitalícia) em') + ' "' + camp.name + '"', 'Limite de gasto do(s) conjunto(s): ~$' + effTot + ' — Meta confirmou' + (fail.length ? (' · ' + fail.length + ' conjunto(s) falhou') : '') + '. Orçamento intacto.' + (isStop ? '' : ' · salvo p/ amanhã'));
+                try { logRuleHist(camp, 'LIMITAR_GASTO', (isStop ? 'Parar vitalícia (limite conj ~$' + effTot + ')' : ('Rodar +$' + addX + ' vitalícia (limite conj ~$' + effTot + ')')), { dailyOld: null, dailyNew: (isStop ? null : addX), endOld: null, endNew: null }); } catch(e){}
+                closeCboDetail(); renderCBO();
+              });
+            });
+          })
+          .catch(function(e){ notifyErr('Erro ao aplicar limite (vitalícia) em "' + camp.name + '"', (e && e.message) ? e.message : String(e)); restore(); });
+      }
+      /* DIÁRIO: spend_cap = gasto+X. postForm traz o erro detalhado. Verifica lendo o spend_cap de volta. */
       var confMsg = isStop
         ? ('PARAR "' + camp.name + '" agora?\nA campanha para no gasto atual (~$' + Math.round(campSpend) + ').')
         : ('Rodar +$' + addX + ' HOJE em "' + camp.name + '"?\nA campanha roda até ~$' + Math.round(capUsd) + ' (gasto atual $' + Math.round(campSpend) + ' + $' + addX + ') e para.\n(Amanhã é só clicar de novo — o valor fica salvo.)');
       if (!confirm(confMsg)) { restore(); return; }
       return applyCampCap(useTk, camp.id, cents).then(function(appliedCents){
-        var bumped = appliedCents > cents + 1; /* a Meta exigiu um mínimo maior que o pedido */
+        var bumped = appliedCents > cents + 1;
         return fjRetry(API + '/' + camp.id + '?fields=spend_cap&access_token=' + useTk).then(function(v){
           var got = (v && v.spend_cap != null && v.spend_cap !== '') ? parseInt(v.spend_cap) : null;
           var ok = got != null && Math.abs(got - appliedCents) <= 300;
           if (ok) {
-            camp.spend_cap = String(got); setCapMark(camp.id, true);
+            camp.spend_cap = String(got);
             if (!isStop && addX > 0) { try { localStorage.setItem(daycapKey(camp), String(addX)); } catch(e){} }
-            notifyOk((isStop ? 'PAROU' : 'Limite aplicado em') + ' "' + camp.name + '"', 'Teto da campanha: $' + Math.round(got/100) + ' — Meta confirmou' + (bumped ? ' (a Meta exigiu esse mínimo; o valor pedido era baixo demais)' : '') + (isStop ? '' : ' · salvo p/ amanhã'));
+            notifyOk((isStop ? 'PAROU' : 'Limite aplicado em') + ' "' + camp.name + '"', 'Teto da campanha: $' + Math.round(got/100) + ' — Meta confirmou' + (bumped ? ' (a Meta exigiu esse mínimo)' : '') + (isStop ? '' : ' · salvo p/ amanhã'));
             try { logRuleHist(camp, 'LIMITAR_GASTO', (isStop ? 'Parar (teto campanha $' + Math.round(got/100) + ')' : ('Rodar hoje (teto campanha $' + Math.round(got/100) + ')')), { dailyOld: null, dailyNew: (isStop ? null : addX), endOld: null, endNew: null }); } catch(e){}
             closeCboDetail(); renderCBO();
           } else {
-            setCapMark(camp.id, false);
             notifyErr('Meta NÃO gravou o teto de "' + camp.name + '"', 'valor lido: ' + (got != null ? ('$' + Math.round(got/100)) : 'nenhum') + '. Tente de novo.');
             renderCBO(); restore();
           }
         });
       }).catch(function(e){
-        setCapMark(camp.id, false);
         notifyErr('Meta recusou o teto de "' + camp.name + '"', (e && e.message ? e.message : String(e)));
         restore();
       });
@@ -3327,8 +3373,28 @@ html,body{background:#fbfcfd!important}
     var camp = cboData[i];
     if (!camp) return;
     var useTk = camp._tk;
+    var isLife = (parseInt(camp.lifetime_budget) || 0) > 0;
     var btn = document.getElementById('cspendrem_' + i) || document.getElementById('detCapRemove') || document.getElementById('cspendbtn_' + i) || document.getElementById('detCapSave');
     var btnLbl = btn ? btn.innerHTML : '';
+    if (isLife) {
+      /* VITALÍCIA: "remover" = SUBIR o limite de gasto do(s) conjunto(s) p/ o ORÇAMENTO TOTAL da campanha
+         (o conjunto nunca passa do orçamento) = sem limite na prática. NÃO mexe no orçamento. */
+      var lbCents = parseInt(camp.lifetime_budget) || 0;
+      var noCap = lbCents > 0 ? lbCents : 100000000; /* fallback $1.000.000 */
+      var capped = (camp._adsets || []).filter(function(s){ var st=(s.effective_status||'').toUpperCase(); var c=(s.lifetime_spend_cap!=null)?+s.lifetime_spend_cap:0; return st==='ACTIVE' && c>0 && c < noCap*0.98; });
+      if (!capped.length) capped = (camp._adsets || []).filter(function(s){ return (s.effective_status||'').toUpperCase()==='ACTIVE'; });
+      if (!capped.length) { alert('Nenhum conjunto ativo com limite para remover.'); return; }
+      if (!confirm('REMOVER o limite de gasto de "' + camp.name + '"?\nO limite do(s) ' + capped.length + ' conjunto(s) sobe p/ o orçamento total ($' + Math.round(noCap/100).toLocaleString('pt-BR') + ') = sem limite na prática. O orçamento NÃO muda.')) return;
+      if (btn) { btn.disabled = true; btn.innerHTML = '…'; }
+      Promise.all(capped.map(function(s){ return capAdset(useTk, s.id, noCap); })).then(function(){
+        (camp._adsets || []).forEach(function(s){ if (capped.indexOf(s) >= 0) s.lifetime_spend_cap = noCap; });
+        recomputeLifeCap(camp);
+        notifyOk('Limite REMOVIDO de "' + camp.name + '"', capped.length + ' conjunto(s) — limite subiu p/ o orçamento total. Orçamento intacto.');
+        closeCboDetail(); renderCBO();
+      }).catch(function(e){ notifyErr('Erro ao REMOVER limite de "' + camp.name + '"', e && e.message ? e.message : ''); if (btn) { btn.disabled = false; btn.innerHTML = btnLbl; } renderCBO(); });
+      return;
+    }
+    /* DIÁRIO: spend_cap volta ao sentinela "sem teto". */
     if (!confirm('REMOVER o limite de gasto de "' + camp.name + '"?\nA campanha volta a rodar SEM teto.')) return;
     if (btn) { btn.disabled = true; btn.innerHTML = '…'; }
     postForm(camp.id, useTk, { spend_cap: MAD_NOCAP }).then(function(){
@@ -3430,12 +3496,40 @@ html,body{background:#fbfcfd!important}
     }
     return attempt(cents, 0);
   }
+  /* DETECÇÃO CONFIÁVEL do LIMITE DE GASTO em campanha VITALÍCIA (nunca falsa): lê o lifetime_spend_cap dos
+     conjuntos ATIVOS (carregados direto da Meta). LIMITADA = algum conjunto ativo com teto REAL (> 0 e abaixo
+     de 98% do orçamento total — teto = orçamento inteiro é o "remover" = sem limite na prática). Guarda tbm o
+     TOTAL efetivo dos tetos ativos (camp._capTotalCents) p/ mostrar no selo. Diário NÃO usa isto (usa spend_cap). */
+  function recomputeLifeCap(camp) {
+    var lbCents = parseInt(camp.lifetime_budget) || 0;
+    if (lbCents <= 0) { camp._hasCap = false; camp._capTotalCents = 0; return; }
+    var capped = false, capSum = 0;
+    (camp._adsets || []).forEach(function(s) {
+      var stt = (s.effective_status || '').toUpperCase();
+      var cap = (s.lifetime_spend_cap != null) ? +s.lifetime_spend_cap : 0;
+      if (stt === 'ACTIVE' && cap > 0 && cap < lbCents * 0.98) { capSum += cap; capped = true; }
+    });
+    camp._hasCap = capped; camp._capTotalCents = capSum;
+  }
   /* Aplica o spend_cap na CAMPANHA (centavos). Se a Meta recusar por estar ABAIXO DO MÍNIMO ("must be at least $X"
      / "pelo menos $X" / "too low"), LÊ o mínimo da mensagem e REAPLICA com ele — até 4x. Devolve os centavos
      REALMENTE aplicados (pode ter subido p/ o mínimo da Meta). Assim NÃO dá erro por valor baixo: aplica o mínimo. */
   function applyCampCap(prefTk, campId, cents) {
     function attempt(v, n) {
       return postForm(campId, prefTk, { spend_cap: v }).then(function(){ return v; })
+        .catch(function(e){
+          var mn = metaMinCapCents(e && e.message);
+          if (n < 4 && mn && mn > v) return attempt(mn, n + 1);
+          throw e;
+        });
+    }
+    return attempt(cents, 0);
+  }
+  /* VITALÍCIO: baixa o lifetime_budget da CAMPANHA p/ o teto (a Meta bloqueia spend_cap em vitalício).
+     Min-retry. Devolve os centavos aplicados. */
+  function applyLifeBudget(prefTk, campId, cents) {
+    function attempt(v, n) {
+      return postForm(campId, prefTk, { lifetime_budget: v }).then(function(){ return v; })
         .catch(function(e){
           var mn = metaMinCapCents(e && e.message);
           if (n < 4 && mn && mn > v) return attempt(mn, n + 1);
@@ -3675,10 +3769,15 @@ html,body{background:#fbfcfd!important}
     /* LIMITADA = EXCLUSIVAMENTE o spend_cap REAL da campanha (campo carregado direto com a campanha — SEMPRE
        confiável, não depende dos conjuntos). NUNCA usa marca local -> selo NUNCA é falso: só mostra 🔒 se a
        Meta realmente tem o teto. Aparece assim que aplica (manual = na hora; madrugada = ao recarregar). */
+    var isLifeC = (parseInt(camp.lifetime_budget) || 0) > 0;
     var scNum = (camp.spend_cap != null && camp.spend_cap !== '') ? parseInt(camp.spend_cap) : 0;
     var hasCampCap = scNum > 0 && scNum < 900000000000000; /* abaixo do sentinela 922337203685477 = teto REAL */
-    var isCapped = hasCampCap;
-    var tetoTxt = hasCampCap ? ('🔒 LIMITADA · teto ' + fmtUSD(scNum/100)) : 'sem limite';
+    /* DIÁRIO: teto = spend_cap da campanha. VITALÍCIA: teto = limite de gasto do(s) conjunto(s) (_hasCap/_capTotal),
+       lido direto da Meta -> selo NUNCA falso; some quando o teto sobe p/ o orçamento total (remover). */
+    var isCapped = isLifeC ? !!camp._hasCap : hasCampCap;
+    var tetoTxt = isCapped
+      ? ('🔒 LIMITADA · teto ' + fmtUSD((isLifeC ? (camp._capTotalCents || 0) : scNum) / 100))
+      : 'sem limite';
     var remembered = getDayCap(camp); /* ultimo "rodar hoje" salvo */
     var preVal = remembered > 0 ? Math.round(remembered) : '';
     var madV = ISOLATED ? 0 : madValueFor(camp);      /* valor efetivo (global ou exceção) */
