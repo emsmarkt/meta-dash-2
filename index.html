@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-24.1</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-24.3</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -1540,7 +1540,7 @@ html,body{background:#fbfcfd!important}
           /* Contas/BMs a ignorar (ex: Effective 01 e Origin). */
           var an = (acc.name || '').toLowerCase();
           if (an.indexOf('effective 01') >= 0 || an.indexOf('origin') >= 0 || an.indexOf('hhh hhh') >= 0) return null;
-          return fjPaged(API+'/'+acc.id+'/campaigns?fields=name,status,effective_status,issues_info,lifetime_budget,daily_budget,stop_time,objective,bid_strategy&effective_status=["ACTIVE","PAUSED","IN_PROCESS","WITH_ISSUES"]&limit=100&access_token='+acc._tk).then(function(list) {
+          return fjPaged(API+'/'+acc.id+'/campaigns?fields=name,status,effective_status,issues_info,lifetime_budget,daily_budget,stop_time,objective,bid_strategy,spend_cap&effective_status=["ACTIVE","PAUSED","IN_PROCESS","WITH_ISSUES"]&limit=100&access_token='+acc._tk).then(function(list) {
             list.filter(function(c) {
               var es = (c.effective_status || c.status || '').toUpperCase();
               if (es === 'DELETED' || es === 'ARCHIVED') return false; /* nao mostrar excluidas/arquivadas */
@@ -3282,125 +3282,59 @@ html,body{background:#fbfcfd!important}
     var restore = function(){ if (btn) { btn.disabled = false; btn.innerHTML = btnLabel; } };
     if (btn) { btn.disabled = true; btn.textContent = '…'; }
     var useTk = camp._tk;
-    var isActiveSet = function(s){ return (s.effective_status || '').toUpperCase() === 'ACTIVE'; };
-    var spendOf = function(s){ return (s.insights && s.insights.data && s.insights.data[0]) ? (parseFloat(s.insights.data[0].spend) || 0) : 0; };
-    /* Busca CONJUNTOS + gasto vitalicio de cada um (insights maximum) — p/ o teto = gasto + X. */
-    var adsetsUrl = function(){ return API + '/' + camp.id + '/adsets?fields=id,name,effective_status,lifetime_spend_cap,insights.date_preset(maximum){spend}&limit=500&access_token=' + useTk; };
-    var reReadUrl = function(){ return API + '/' + camp.id + '/adsets?fields=id,name,effective_status,lifetime_spend_cap&limit=500&access_token=' + useTk; };
-    var targets = {}; /* adsetId -> teto em CENTAVOS (calculado UMA vez, no 1o read) */
-    var lastErr = '';
-    var matches = function(s){ var t = targets[s.id]; if (t == null) return true; return s.lifetime_spend_cap != null && Math.abs(parseInt(s.lifetime_spend_cap) - t) <= 2; };
-    function syncDisplay(freshSets){
-      var byId = {}; (freshSets || []).forEach(function(s){ byId[s.id] = s.lifetime_spend_cap; });
-      (camp._adsets || []).forEach(function(s){ if (byId[s.id] != null) s.lifetime_spend_cap = byId[s.id]; });
-    }
-    /* Batch: cada conjunto recebe o SEU teto (targets[id]) — bodies diferentes no mesmo batch. */
-    function batchApply(sets){
-      var chunks = [];
-      for (var k = 0; k < sets.length; k += 50) chunks.push(sets.slice(k, k + 50));
-      var seq = Promise.resolve();
-      chunks.forEach(function(chunk){
-        seq = seq.then(function(){
-          var body = new URLSearchParams();
-          body.append('batch', JSON.stringify(chunk.map(function(s){ return { method: 'POST', relative_url: String(s.id), body: 'lifetime_spend_cap=' + targets[s.id] }; })));
-          body.append('access_token', useTk);
-          return fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
-            .then(function(r){ return r.json(); })
-            .then(function(arr){
-              if (arr && arr.error) { lastErr = arr.error.message || 'batch error'; return; }
-              if (Array.isArray(arr)) arr.forEach(function(resp){ if (!(resp && resp.code === 200)) { try { lastErr = JSON.parse(resp.body).error.message; } catch (e) {} } });
-            })
-            .catch(function(e){ lastErr = e && e.message ? e.message : String(e); });
+    /* MECANISMO: teto no NÍVEL DA CAMPANHA (spend_cap) = gasto TOTAL da campanha + addX (ou só o gasto atual,
+       se "parar agora"). O ad-set lifetime_spend_cap dava "Invalid parameter"; spend_cap da campanha é o campo
+       PADRÃO da Meta p/ limite de gasto total e funciona em orçamento DIÁRIO e vitalício. postForm traz o erro
+       detalhado da Meta (error_user_msg). Verifica lendo o spend_cap de volta. */
+    fjRetry(API + '/' + camp.id + '?fields=spend_cap,insights.date_preset(maximum){spend}&access_token=' + useTk).then(function(d){
+      if (d && d.error) { notifyErr('Erro ao ler a campanha "' + camp.name + '"', d.error.message || 'erro'); restore(); return; }
+      var campSpend = (d && d.insights && d.insights.data && d.insights.data[0]) ? (parseFloat(d.insights.data[0].spend) || 0) : (camp._spend || 0);
+      var capUsd = isStop ? Math.ceil(campSpend) : (campSpend + addX);
+      var cents = Math.max(1, Math.round(capUsd * 100));
+      var confMsg = isStop
+        ? ('PARAR "' + camp.name + '" agora?\nA campanha para no gasto atual (~$' + Math.round(campSpend) + ').')
+        : ('Rodar +$' + addX + ' HOJE em "' + camp.name + '"?\nA campanha roda até ~$' + Math.round(capUsd) + ' (gasto atual $' + Math.round(campSpend) + ' + $' + addX + ') e para.\n(Amanhã é só clicar de novo — o valor fica salvo.)');
+      if (!confirm(confMsg)) { restore(); return; }
+      return postForm(camp.id, useTk, { spend_cap: cents }).then(function(){
+        return fjRetry(API + '/' + camp.id + '?fields=spend_cap&access_token=' + useTk).then(function(v){
+          var got = (v && v.spend_cap != null && v.spend_cap !== '') ? parseInt(v.spend_cap) : null;
+          var ok = got != null && Math.abs(got - cents) <= 100;
+          if (ok) {
+            camp.spend_cap = String(got); setCapMark(camp.id, true);
+            if (!isStop && addX > 0) { try { localStorage.setItem(daycapKey(camp), String(addX)); } catch(e){} }
+            notifyOk((isStop ? 'PAROU' : 'Limite aplicado em') + ' "' + camp.name + '"', 'Teto da campanha: $' + Math.round(got/100) + ' — Meta confirmou' + (isStop ? '' : ' · salvo p/ amanhã'));
+            try { logRuleHist(camp, 'LIMITAR_GASTO', (isStop ? 'Parar (teto campanha no gasto atual)' : ('Rodar +$' + addX + ' hoje (teto campanha $' + Math.round(got/100) + ')')), { dailyOld: null, dailyNew: (isStop ? null : addX), endOld: null, endNew: null }); } catch(e){}
+            closeCboDetail(); renderCBO();
+          } else {
+            setCapMark(camp.id, false);
+            notifyErr('Meta NÃO gravou o teto de "' + camp.name + '"', 'valor lido: ' + (got != null ? ('$' + Math.round(got/100)) : 'nenhum') + '. Tente de novo.');
+            renderCBO(); restore();
+          }
         });
+      }).catch(function(e){
+        setCapMark(camp.id, false);
+        notifyErr('Meta recusou o teto de "' + camp.name + '"', (e && e.message ? e.message : String(e)));
+        restore();
       });
-      return seq;
-    }
-    /* Pendentes (recusados por MINIMO, ex.: gastou entre o read e o write) -> capAdset com o teto do conjunto. */
-    function fixPending(sets){
-      return Promise.all(sets.map(function(s){
-        return capAdset(useTk, s.id, targets[s.id]).then(function(){ return null; }).catch(function(e){ lastErr = e && e.message ? e.message : String(e); return (s.name || s.id); });
-      }));
-    }
-    function round(n, total){
-      return fjPagedR(reReadUrl()).then(function(cur){
-        var act = (cur || []).filter(isActiveSet).filter(function(s){ return targets[s.id] != null; });
-        var tot = act.length || total;
-        var pend = act.filter(function(s){ return !matches(s); });
-        var okN = tot - pend.length;
-        if (btn) btn.textContent = okN + '/' + tot;
-        if (!pend.length || n >= 3) return { okN: okN, total: tot, sets: act, pend: pend };
-        return fixPending(pend).then(function(){ return new Promise(function(r){ setTimeout(r, 1200); }); }).then(function(){ return round(n + 1, tot); });
-      });
-    }
-    fjPagedR(adsetsUrl()).then(function(list){
-      var actSets = (list || []).filter(isActiveSet);
-      if (!actSets.length) { notifyErr('Sem conjunto ativo em "' + camp.name + '"', 'Não achei conjunto ativo. Recarregue as campanhas.'); restore(); return; }
-      /* teto por conjunto = gasto vitalicio do conjunto + X (ou so o gasto atual, se "parar agora"). */
-      var totalCampSpend = 0;
-      actSets.forEach(function(s){
-        var sp = spendOf(s); totalCampSpend += sp;
-        var capUsd = isStop ? Math.ceil(sp) : (sp + addX);
-        targets[s.id] = Math.max(1, Math.round(capUsd * 100));
-      });
-      var total = actSets.length;
-      var msg = isStop
-        ? ('PARAR "' + camp.name + '" agora?\nTeto = gasto atual de cada conjunto (' + total + ' ativo(s)). A campanha para.')
-        : ('Rodar +$' + addX + ' HOJE em "' + camp.name + '"?\nO teto de cada conjunto vira o gasto dele + $' + addX + '. ' + total + ' conjunto(s) ativo(s).\n(Amanhã é só clicar de novo — o valor fica salvo.)');
-      if (!confirm(msg)) { restore(); return; }
-      return batchApply(actSets).then(function(){ return round(0, total); }).then(function(res){
-        syncDisplay(res.sets);
-        camp._hasCap = true;
-        if (res.okN > 0) setCapMark(camp.id, true); /* marca LOCAL: limitei -> selo LIMITADA sobrevive à recarga */
-        if (!isStop && addX > 0) { try { localStorage.setItem(daycapKey(camp), String(addX)); } catch(e){} } /* LEMBRA o X p/ amanha */
-        if (res.okN >= res.total) {
-          if (isStop) notifyOk('PAROU "' + camp.name + '"', res.okN + '/' + res.total + ' conjunto(s) — teto no gasto atual');
-          else notifyOk('Rodar +$' + addX + ' hoje em "' + camp.name + '"', res.okN + '/' + res.total + ' conjunto(s) · teto = gasto + $' + addX + ' · salvo p/ amanhã');
-          try { logRuleHist(camp, 'LIMITAR_GASTO', (isStop ? 'Parar (teto no gasto atual)' : ('Rodar +$' + addX + ' hoje (teto = gasto + $' + addX + ')')) + ' (' + res.okN + ' conjunto(s))', { dailyOld: null, dailyNew: (isStop ? null : addX), endOld: null, endNew: null }); } catch (e) {}
-          closeCboDetail();
-          renderCBO();
-        } else {
-          var amostra = (res.pend || []).slice(0, 3).map(function(s){ return (s.name || s.id) + ' ($' + (s.lifetime_spend_cap != null ? Math.round(parseInt(s.lifetime_spend_cap)/100) : '?') + ')'; }).join(', ');
-          var tokenBad = /application has been deleted|access token|OAuth|code 190|session/i.test(lastErr);
-          notifyErr('Limite de gasto: ' + res.okN + '/' + res.total + ' em "' + camp.name + '"', 'Ficaram: ' + (amostra || '?') + (res.pend.length > 3 ? ' …+' + (res.pend.length - 3) : '') + '. ' + (lastErr || '') + (tokenBad ? ' TOKEN INVÁLIDO.' : ''));
-          renderCBO();
-          restore();
-        }
-      });
-    }).catch(function(e){
-      notifyErr('Erro ao buscar conjuntos de "' + camp.name + '"', (e && e.message ? e.message : String(e)));
-      restore();
-    });
+    }).catch(function(e){ notifyErr('Erro ao aplicar em "' + camp.name + '"', (e && e.message ? e.message : String(e))); restore(); });
   }
 
-  /* REMOVER o limite de gasto: sobe o teto p/ o ORCAMENTO TOTAL da campanha (= sem limite na pratica;
-     o conjunto nunca passa do orcamento da campanha). Nao da p/ "zerar" (a Meta le 0 como teto $0). */
+  /* REMOVER o limite de gasto da CAMPANHA: seta spend_cap p/ o sentinela "sem limite" da Meta
+     (922337203685477 = sem teto). Verifica lendo de volta. */
+  var MAD_NOCAP = 922337203685477; /* valor da Meta p/ "sem spend_cap" */
   function removeSpendCap(i) {
     var camp = cboData[i];
     if (!camp) return;
-    var lbCents = parseInt(camp.lifetime_budget) || 0;
-    var noCap = lbCents > 0 ? lbCents : 100000000; /* fallback $1.000.000 */
     var useTk = camp._tk;
     var btn = document.getElementById('cspendrem_' + i) || document.getElementById('detCapRemove') || document.getElementById('cspendbtn_' + i) || document.getElementById('detCapSave');
     var btnLbl = btn ? btn.innerHTML : '';
-    if (!confirm('REMOVER o limite de gasto de "' + camp.name + '"?\nO teto sobe p/ o orçamento total = sem limite na prática. A campanha volta a rodar.')) return;
+    if (!confirm('REMOVER o limite de gasto de "' + camp.name + '"?\nA campanha volta a rodar SEM teto.')) return;
     if (btn) { btn.disabled = true; btn.innerHTML = '…'; }
-    /* Busca os conjuntos FRESCOS (nao depende do _adsets, que pode nao ter carregado) -> acha os ATIVOS
-       com teto REAL (abaixo do orcamento) e remove. */
-    fjPagedR(API + '/' + camp.id + '/adsets?fields=id,name,effective_status,lifetime_spend_cap&limit=500&access_token=' + useTk).then(function(list){
-      var capped = (list || []).filter(function(s){ return (s.effective_status||'').toUpperCase()==='ACTIVE' && s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0 && (lbCents <= 0 || +s.lifetime_spend_cap < lbCents); });
-      if (!capped.length) {
-        camp._hasCap = false; setCapMark(camp.id, false);
-        notifyOk('"' + camp.name + '" já está sem limite', 'Nenhum conjunto ativo com teto de gasto.');
-        renderCBO();
-        return;
-      }
-      return Promise.all(capped.map(function(s){ return capAdset(useTk, s.id, noCap); })).then(function(){
-        camp._hasCap = false; setCapMark(camp.id, false);
-        (camp._adsets || []).forEach(function(s){ if ((s.effective_status||'').toUpperCase()==='ACTIVE') s.lifetime_spend_cap = noCap; });
-        notifyOk('Limite REMOVIDO de "' + camp.name + '"', capped.length + ' conjunto(s) liberado(s) — a campanha volta a rodar sem teto.');
-        closeCboDetail();
-        renderCBO();
-      });
+    postForm(camp.id, useTk, { spend_cap: MAD_NOCAP }).then(function(){
+      camp.spend_cap = String(MAD_NOCAP); setCapMark(camp.id, false); camp._hasCap = false;
+      notifyOk('Limite REMOVIDO de "' + camp.name + '"', 'A campanha volta a rodar sem teto.');
+      closeCboDetail();
+      renderCBO();
     }).catch(function(e){ notifyErr('Erro ao REMOVER limite de "' + camp.name + '"', e && e.message ? e.message : ''); if (btn) { btn.disabled = false; btn.innerHTML = btnLbl; } renderCBO(); });
   }
 
@@ -3717,21 +3651,15 @@ html,body{background:#fbfcfd!important}
   function spendCellHtml(camp, i) {
     /* "Quanto rodar HOJE" (US$). O dash soma ao gasto atual -> teto acumulado. Aparece em TODAS as campanhas
        (o apply busca os conjuntos frescos). Pre-preenche com o ultimo valor usado (lembrado por campanha). */
-    var actSets = (camp._adsets || []).filter(function(s){ return (s.effective_status || '').toUpperCase() === 'ACTIVE'; });
-    var lbCents = parseInt(camp.lifetime_budget) || 0;
-    var capsC = actSets.map(function(s){ return (s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0) ? +s.lifetime_spend_cap : null; }).filter(function(v){ return v != null; });
-    var realCaps = capsC.filter(function(v){ return !(lbCents > 0 && v >= lbCents); }); /* teto >= orcamento total = sem limite */
-    var uniq = realCaps.filter(function(v, ix, a){ return a.indexOf(v) === ix; });
-    /* LIMITADA = teto real em conjunto ativo (do read) OU _hasCap OU marca LOCAL (limitei pelo painel).
-       RECONCILIA: se os conjuntos VIERAM (actSets.length>0) e NÃO há teto, é remoção real -> limpa a marca.
-       Se os conjuntos NÃO vieram (rate limit), confia na marca local -> selo continua aparecendo. */
-    var adsetsLoaded = actSets.length > 0;
+    /* LIMITADA = a CAMPANHA tem spend_cap real (abaixo do sentinela "sem limite"). O spend_cap vem no
+       carregamento (campo da campanha), então não depende dos conjuntos (que às vezes falham no rate limit).
+       Reforço: marca LOCAL. Reconcilia: se o spend_cap veio e é "sem limite", limpa a marca. */
+    var scNum = (camp.spend_cap != null && camp.spend_cap !== '') ? parseInt(camp.spend_cap) : 0;
+    var hasCampCap = scNum > 0 && scNum < 900000000000000; /* abaixo do sentinela 922337203685477 = teto REAL */
     var marked = isCapMarked(camp.id);
-    if (adsetsLoaded && realCaps.length === 0 && !camp._hasCap) { if (marked) { setCapMark(camp.id, false); marked = false; } }
-    var isCapped = realCaps.length > 0 || !!camp._hasCap || marked;
-    var tetoTxt = realCaps.length
-      ? ('🔒 LIMITADA · teto ' + (uniq.length === 1 ? fmtUSD(uniq[0]/100) : (fmtUSD(Math.min.apply(null,realCaps)/100) + '–' + fmtUSD(Math.max.apply(null,realCaps)/100))))
-      : (isCapped ? '🔒 LIMITADA' : 'sem limite');
+    if (camp.spend_cap != null && !hasCampCap && marked) { setCapMark(camp.id, false); marked = false; }
+    var isCapped = hasCampCap || marked;
+    var tetoTxt = hasCampCap ? ('🔒 LIMITADA · teto ' + fmtUSD(scNum/100)) : (isCapped ? '🔒 LIMITADA' : 'sem limite');
     var remembered = getDayCap(camp); /* ultimo "rodar hoje" salvo */
     var preVal = remembered > 0 ? Math.round(remembered) : '';
     var madV = ISOLATED ? 0 : madValueFor(camp);      /* valor efetivo (global ou exceção) */
