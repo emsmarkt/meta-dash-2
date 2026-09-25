@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-24.3</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-24.4</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -3389,7 +3389,13 @@ html,body{background:#fbfcfd!important}
             var wait613 = (code === 613 || /concurrent request|1 calls? per|per 30 seconds/i.test(msg)) ? (16000 + 6000 * _try) : (6000 * (_try + 1));
             return new Promise(function(res){ setTimeout(res, wait613); }).then(function(){ return postForm(id, tk, params, _try + 1); });
           }
-          throw new Error(msg + (d.error.error_user_msg ? ' - '+d.error.error_user_msg : ''));
+          /* Mensagem RICA: título + msg do usuário + subcódigo, p/ diagnosticar "Invalid parameter" (a Meta
+             costuma explicar o motivo real — ex.: limite mínimo — no error_user_title/error_user_msg). */
+          var full = msg;
+          if (d.error.error_user_title) full += ' | ' + d.error.error_user_title;
+          if (d.error.error_user_msg) full += ' — ' + d.error.error_user_msg;
+          if (d.error.error_subcode) full += ' (subcode ' + d.error.error_subcode + ')';
+          throw new Error(full);
         }
         return d;
       });
