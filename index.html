@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-24.6</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-24.7</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -3672,15 +3672,13 @@ html,body{background:#fbfcfd!important}
   function spendCellHtml(camp, i) {
     /* "Quanto rodar HOJE" (US$). O dash soma ao gasto atual -> teto acumulado. Aparece em TODAS as campanhas
        (o apply busca os conjuntos frescos). Pre-preenche com o ultimo valor usado (lembrado por campanha). */
-    /* LIMITADA = a CAMPANHA tem spend_cap real (abaixo do sentinela "sem limite"). O spend_cap vem no
-       carregamento (campo da campanha), então não depende dos conjuntos (que às vezes falham no rate limit).
-       Reforço: marca LOCAL. Reconcilia: se o spend_cap veio e é "sem limite", limpa a marca. */
+    /* LIMITADA = EXCLUSIVAMENTE o spend_cap REAL da campanha (campo carregado direto com a campanha — SEMPRE
+       confiável, não depende dos conjuntos). NUNCA usa marca local -> selo NUNCA é falso: só mostra 🔒 se a
+       Meta realmente tem o teto. Aparece assim que aplica (manual = na hora; madrugada = ao recarregar). */
     var scNum = (camp.spend_cap != null && camp.spend_cap !== '') ? parseInt(camp.spend_cap) : 0;
     var hasCampCap = scNum > 0 && scNum < 900000000000000; /* abaixo do sentinela 922337203685477 = teto REAL */
-    var marked = isCapMarked(camp.id);
-    if (camp.spend_cap != null && !hasCampCap && marked) { setCapMark(camp.id, false); marked = false; }
-    var isCapped = hasCampCap || marked;
-    var tetoTxt = hasCampCap ? ('🔒 LIMITADA · teto ' + fmtUSD(scNum/100)) : (isCapped ? '🔒 LIMITADA' : 'sem limite');
+    var isCapped = hasCampCap;
+    var tetoTxt = hasCampCap ? ('🔒 LIMITADA · teto ' + fmtUSD(scNum/100)) : 'sem limite';
     var remembered = getDayCap(camp); /* ultimo "rodar hoje" salvo */
     var preVal = remembered > 0 ? Math.round(remembered) : '';
     var madV = ISOLATED ? 0 : madValueFor(camp);      /* valor efetivo (global ou exceção) */
