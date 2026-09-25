@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-24.4</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-24.6</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -217,7 +217,7 @@ html,body{background:#fbfcfd!important}
       </label>
       <button class="btn" id="btnPauseAllCBO" title="PAUSA todas as campanhas com CBO no nome que estão ativas (em massa, no Meta)" style="border-color:#cf222e;color:#cf222e">&#9208; Pausar tudo (CBO)</button>
       <button class="btn" id="btnActivateAllCBO" title="ATIVA todas as campanhas CBO que estão pausadas (em massa, no Meta)" style="border-color:#1a7f37;color:#1a7f37">&#9654; Ativar tudo (CBO)</button>
-      <span id="madGlobWrap" title="Limite de gasto na MADRUGADA (a partir de 00:00 BR) para TODAS as campanhas ativas. O robô só APLICA o teto (à meia-noite); você REMOVE de manhã manualmente no dash. Exclua campanhas específicas no detalhe delas." style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#57606a;padding:4px 8px;border:1px solid #8250df;border-radius:6px">
+      <span id="madGlobWrap" title="Limite de gasto na MADRUGADA (a partir de 23:30 BR) para TODAS as campanhas ativas. O robô só APLICA o teto (às 23:30, teto = gasto atual + valor); você REMOVE de manhã manualmente no dash. Exclua campanhas específicas no detalhe delas." style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#57606a;padding:4px 8px;border:1px solid #8250df;border-radius:6px">
         <span style="font-weight:600;color:#8250df">🌙 Madrugada (todas):</span>
         <span style="color:#656d76">$</span>
         <input class="cbo-inp" id="madGlobInp" type="number" min="1" step="any" placeholder="ex: 30" style="width:56px;text-align:right">
@@ -594,7 +594,7 @@ html,body{background:#fbfcfd!important}
     return fetch(u + '/applied').then(function(r){ return r.json(); }).then(function(m){ appliedShared = (m && typeof m === 'object') ? m : {}; }).catch(function(){ appliedShared = {}; });
   }
   /* CONFIG do LIMITE DE MADRUGADA (do worker). madGlobal={v,en} vale p/ TODAS as ativas; madCfg={campId:{v,en}}
-     são exceções (en:false EXCLUI a campanha; v>0 valor próprio). O robô SÓ APLICA à 00:00 (você remove manual). */
+     são exceções (en:false EXCLUI a campanha; v>0 valor próprio). O robô SÓ APLICA às 23:30 (você remove manual). */
   var madGlobal = {}, madCfg = {};
   function fetchMadrugada() {
     var u = getWkUrl();
@@ -3295,15 +3295,16 @@ html,body{background:#fbfcfd!important}
         ? ('PARAR "' + camp.name + '" agora?\nA campanha para no gasto atual (~$' + Math.round(campSpend) + ').')
         : ('Rodar +$' + addX + ' HOJE em "' + camp.name + '"?\nA campanha roda até ~$' + Math.round(capUsd) + ' (gasto atual $' + Math.round(campSpend) + ' + $' + addX + ') e para.\n(Amanhã é só clicar de novo — o valor fica salvo.)');
       if (!confirm(confMsg)) { restore(); return; }
-      return postForm(camp.id, useTk, { spend_cap: cents }).then(function(){
+      return applyCampCap(useTk, camp.id, cents).then(function(appliedCents){
+        var bumped = appliedCents > cents + 1; /* a Meta exigiu um mínimo maior que o pedido */
         return fjRetry(API + '/' + camp.id + '?fields=spend_cap&access_token=' + useTk).then(function(v){
           var got = (v && v.spend_cap != null && v.spend_cap !== '') ? parseInt(v.spend_cap) : null;
-          var ok = got != null && Math.abs(got - cents) <= 100;
+          var ok = got != null && Math.abs(got - appliedCents) <= 300;
           if (ok) {
             camp.spend_cap = String(got); setCapMark(camp.id, true);
             if (!isStop && addX > 0) { try { localStorage.setItem(daycapKey(camp), String(addX)); } catch(e){} }
-            notifyOk((isStop ? 'PAROU' : 'Limite aplicado em') + ' "' + camp.name + '"', 'Teto da campanha: $' + Math.round(got/100) + ' — Meta confirmou' + (isStop ? '' : ' · salvo p/ amanhã'));
-            try { logRuleHist(camp, 'LIMITAR_GASTO', (isStop ? 'Parar (teto campanha no gasto atual)' : ('Rodar +$' + addX + ' hoje (teto campanha $' + Math.round(got/100) + ')')), { dailyOld: null, dailyNew: (isStop ? null : addX), endOld: null, endNew: null }); } catch(e){}
+            notifyOk((isStop ? 'PAROU' : 'Limite aplicado em') + ' "' + camp.name + '"', 'Teto da campanha: $' + Math.round(got/100) + ' — Meta confirmou' + (bumped ? ' (a Meta exigiu esse mínimo; o valor pedido era baixo demais)' : '') + (isStop ? '' : ' · salvo p/ amanhã'));
+            try { logRuleHist(camp, 'LIMITAR_GASTO', (isStop ? 'Parar (teto campanha $' + Math.round(got/100) + ')' : ('Rodar hoje (teto campanha $' + Math.round(got/100) + ')')), { dailyOld: null, dailyNew: (isStop ? null : addX), endOld: null, endNew: null }); } catch(e){}
             closeCboDetail(); renderCBO();
           } else {
             setCapMark(camp.id, false);
@@ -3424,6 +3425,20 @@ html,body{background:#fbfcfd!important}
         .catch(function(e){
           var mn = metaMinCapCents(e && e.message);
           if (n < 3 && mn && mn > v) return attempt(mn, n + 1);
+          throw e;
+        });
+    }
+    return attempt(cents, 0);
+  }
+  /* Aplica o spend_cap na CAMPANHA (centavos). Se a Meta recusar por estar ABAIXO DO MÍNIMO ("must be at least $X"
+     / "pelo menos $X" / "too low"), LÊ o mínimo da mensagem e REAPLICA com ele — até 4x. Devolve os centavos
+     REALMENTE aplicados (pode ter subido p/ o mínimo da Meta). Assim NÃO dá erro por valor baixo: aplica o mínimo. */
+  function applyCampCap(prefTk, campId, cents) {
+    function attempt(v, n) {
+      return postForm(campId, prefTk, { spend_cap: v }).then(function(){ return v; })
+        .catch(function(e){
+          var mn = metaMinCapCents(e && e.message);
+          if (n < 4 && mn && mn > v) return attempt(mn, n + 1);
           throw e;
         });
     }
@@ -3671,7 +3686,7 @@ html,body{background:#fbfcfd!important}
     var madV = ISOLATED ? 0 : madValueFor(camp);      /* valor efetivo (global ou exceção) */
     var madExc = !ISOLATED && madExcluded(camp);       /* excluída da madrugada */
     return '<div style="display:flex;flex-direction:column;gap:3px;min-width:104px">'
-      + (madExc ? '<span style="font-size:9px;font-weight:700;color:#656d76" title="Excluída do limite de madrugada">🌙 madrugada: fora</span>' : (madV > 0 ? '<span style="font-size:9px;font-weight:700;color:#8250df" title="Robô limita a partir de 00:00 BR (você remove de manhã manual)">🌙 madrugada máx $' + Math.round(madV) + '</span>' : ''))
+      + (madExc ? '<span style="font-size:9px;font-weight:700;color:#656d76" title="Excluída do limite de madrugada">🌙 madrugada: fora</span>' : (madV > 0 ? '<span style="font-size:9px;font-weight:700;color:#8250df" title="Robô limita a partir de 23:30 BR (teto = gasto atual + valor; você remove de manhã manual)">🌙 madrugada máx $' + Math.round(madV) + '</span>' : ''))
       + '<span style="font-size:9px;color:#0969da;text-transform:uppercase;letter-spacing:.03em" title="quanto você quer rodar HOJE — o teto vira o gasto atual + esse valor">Rodar hoje</span>'
       + '<div style="display:flex;align-items:center;gap:3px">'
       + '<span style="font-size:11px;color:#656d76">$</span>'
@@ -4030,7 +4045,7 @@ html,body{background:#fbfcfd!important}
   }
   document.getElementById('btnPauseAllCBO').addEventListener('click', function() { bulkCBOStatus('PAUSED'); });
   document.getElementById('btnActivateAllCBO').addEventListener('click', function() { bulkCBOStatus('ACTIVE'); });
-  /* MADRUGADA GLOBAL (todas as campanhas): $ que o robô limita na madrugada (00:00–07:00 BR). */
+  /* MADRUGADA GLOBAL (todas as campanhas): $ que o robô limita na madrugada (23:30–07:00 BR). */
   (function(){
     var wrap = document.getElementById('madGlobWrap');
     if (!wrap) return;
@@ -4046,12 +4061,12 @@ html,body{background:#fbfcfd!important}
     if (apply) apply.addEventListener('click', function(){
       var inp = document.getElementById('madGlobInp'); var v = inp ? parseFloat(inp.value) : 0;
       if (!(v > 0)) { alert('Digite o máximo (US$) da madrugada p/ TODAS. Ex: 30'); return; }
-      if (!confirm('Aplicar limite de madrugada de $' + v + ' em TODAS as campanhas ativas?\nO robô SÓ LIMITA à 00:00 (BR), toda noite. Você REMOVE de manhã manualmente no dash.\n(Exclua campanhas específicas no detalhe delas.)')) return;
+      if (!confirm('Aplicar limite de madrugada de $' + v + ' em TODAS as campanhas ativas?\nO robô SÓ LIMITA às 23:30 (BR), toda noite (teto = gasto atual + $' + v + '). Você REMOVE de manhã manualmente no dash.\n(Exclua campanhas específicas no detalhe delas.)')) return;
       apply.disabled = true; apply.textContent = '…';
       saveMadrugadaGlobal(v, true).then(function(){
         apply.disabled = false; apply.textContent = 'Aplicar a todas';
         window.renderMadGlobal(); renderCBO();
-        notifyOk('Madrugada ATIVADA em todas', 'Máx $' + v + ' a partir de 00:00 BR. O robô só LIMITA — você remove de manhã manual. Precisa do robô em LIVE.');
+        notifyOk('Madrugada ATIVADA em todas', 'Máx $' + v + ' a partir de 23:30 BR (gasto atual + $' + v + '). O robô só LIMITA — você remove de manhã manual. Precisa do robô em LIVE.');
       }).catch(function(e){ apply.disabled = false; apply.textContent = 'Aplicar a todas'; notifyErr('Erro ao salvar madrugada global', e && e.message ? e.message : ''); });
     });
     var off = document.getElementById('madGlobOff');
