@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-25.2</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-26.1</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -528,13 +528,15 @@ html,body{background:#fbfcfd!important}
   function getRtICType() { try { return localStorage.getItem('rt_ictype') || '2'; } catch(e) { return '2'; } }
   function saveRtICType(v) { try { if (v) localStorage.setItem('rt_ictype', v); else localStorage.removeItem('rt_ictype'); } catch(e) {} }
   function hasConv() { return !!(getRtTk() || getUtmTk()); }
-  /* FATURAMENTO. RedTrack (dash principal): cada VENDA vale a comissão FIXA (RULES.commission = $120) ->
-     faturamento = nº de vendas × $120 (pedido do usuário 23/09). UTMify (instância isolada): valor REAL
-     das ordens (USD, direto). */
+  /* FATURAMENTO = RECEITA REAL da RedTrack (coluna Revenue, USD direto) — as comissões VARIAM por venda
+     ($120, $250, $240...), então NÃO multiplica mais por comissão fixa (pedido do usuário 25/09). UTMify
+     (instância isolada) = valor real das ordens. Fallback: se a RedTrack não mandou revenue mas há vendas,
+     usa vendas × comissão-base só p/ não zerar o faturamento. */
   function campFat(c) {
     var cv = c && c._conv; if (!cv) return 0;
-    if (cv.src === 'rt') return (cv.sales || 0) * RULES.commission;
-    return cv.revenue || 0;
+    if (cv.revenue > 0) return cv.revenue;
+    if (cv.src === 'rt' && (cv.sales || 0) > 0) return cv.sales * RULES.commission;
+    return 0;
   }
   /* URL do Worker (Cloudflare) FIXA no codigo — igual p/ todos que acessam (nao pede a cada um).
      Se mudar o worker, troque so esta linha. (localStorage 'wk_url' ainda sobrescreve, se existir.) */
@@ -743,6 +745,31 @@ html,body{background:#fbfcfd!important}
     }
     var pool = [];
     for (var w = 0; w < Math.min(CONC, suspects.length); w++) pool.push(worker());
+    return Promise.all(pool);
+  }
+  /* PREENCHE os CONJUNTOS que a busca em LOTE perdeu (rate limit) — p/ o LANCE e o LIMITE DE GASTO não
+     ficarem "sem valor". Alvo = campanha ENTREGANDO sem NENHUM conjunto ATIVO carregado. Busca 1-a-1
+     (pool de 4), atualiza camp._adsets + recomputeLifeCap. NÃO mexe se já tem conjunto ativo (não desperdiça). */
+  function fillMissingAdsets(list) {
+    var need = (list || []).filter(function(c){
+      if (!c || !c._tk) return false;
+      var eff = (c.effective_status || c.status || '').toUpperCase();
+      if (eff !== 'ACTIVE' && eff !== 'WITH_ISSUES') return false; /* só as que entregam */
+      var hasActive = (c._adsets || []).some(function(s){ return (s.effective_status || '').toUpperCase() === 'ACTIVE'; });
+      return !hasActive;
+    });
+    if (!need.length) return Promise.resolve();
+    var i = 0, CONC = 4;
+    function one() {
+      if (i >= need.length) return Promise.resolve();
+      var c = need[i++];
+      return fjPagedChecked(API + '/' + c.id + '/adsets?fields=id,name,effective_status,bid_amount,lifetime_spend_cap&limit=200&access_token=' + c._tk)
+        .then(function(res){ if (res && res.items && res.items.length) { c._adsets = res.items; recomputeLifeCap(c); } })
+        .catch(function(){})
+        .then(one);
+    }
+    var pool = [];
+    for (var w = 0; w < Math.min(CONC, need.length); w++) pool.push(one());
     return Promise.all(pool);
   }
   /* Igual fjPaged, mas DEVOLVE o erro junto ({data, error}) p/ avisar token quebrado na tela
@@ -1285,11 +1312,12 @@ html,body{background:#fbfcfd!important}
           if (row.sub3 == null || row.sub3 === '') return;
           var sales = parseInt(row['convtype'+pType]) || parseInt(row.approved) || 0;
           var cost = 0; ['cost','total_cost','spend','ad_cost'].forEach(function(k){ if (!cost && row[k]!=null && row[k]!=='') cost = parseFloat(row[k])||0; });
-          by[String(row.sub3)] = { sales: sales, cost: cost };
+          var rev = parseFloat(row.revenue) || parseFloat(row['revenuetype'+pType]) || parseFloat(row.total_revenue) || 0; /* receita REAL (USD) */
+          by[String(row.sub3)] = { sales: sales, cost: cost, revenue: rev };
         });
         camps.forEach(function(c) {
           var v = by[String(c.id)];
-          if (v && v.cost > 0) { var spUsd = v.cost; c._roas7d = spUsd > 0 ? (v.sales*RULES.commission)/spUsd : 0; } /* RedTrack cost JÁ em USD (não divide por câmbio) */
+          if (v && v.cost > 0) { var spUsd = v.cost; var revU = v.revenue > 0 ? v.revenue : (v.sales*RULES.commission); c._roas7d = spUsd > 0 ? revU/spUsd : 0; } /* receita real / custo (ambos USD) */
         });
       })
       .catch(function(){});
@@ -1722,6 +1750,12 @@ html,body{background:#fbfcfd!important}
               /* nao re-renderiza se o usuario estiver digitando num campo (nao apaga data/lance em edicao). */
               var ae = document.activeElement, ed = ae && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName || '');
               if (!ed) renderCBO();
+              /* Preenche os CONJUNTOS que o lote perdeu (lance/limite "sem valor") -> re-renderiza qdo terminar. */
+              return fillMissingAdsets(camps).then(function(){
+                if (cboData !== camps) return;
+                var ae2 = document.activeElement, ed2 = ae2 && /^(INPUT|SELECT|TEXTAREA)$/.test(ae2.tagName || '');
+                if (!ed2) renderCBO();
+              });
             }).catch(function(){});
             /* Auto-apply agora e responsabilidade do ROBO (interruptor LIVE/DRY). O dashboard nao auto-aplica mais. */
           });
@@ -3043,10 +3077,15 @@ html,body{background:#fbfcfd!important}
 
     /* LIMITE DE GASTO por DIA: o usuario digita QUANTO rodar HOJE; o dash soma ao gasto atual e seta o teto. */
     var lbCentsD = parseInt(camp.lifetime_budget) || 0;
-    var capsC = actSetsB.map(function(s){ return (s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0) ? +s.lifetime_spend_cap : null; }).filter(function(v){ return v != null; });
-    var realCaps = capsC.filter(function(v){ return !(lbCentsD > 0 && v >= lbCentsD); }); /* teto >= orcamento total = sem limite na pratica */
-    var uniqCap = realCaps.filter(function(v, ix, a){ return a.indexOf(v) === ix; });
-    var capCurTxt = realCaps.length ? ('teto ' + (uniqCap.length === 1 ? fmtUSD(uniqCap[0]/100) : (fmtUSD(Math.min.apply(null,realCaps)/100) + '–' + fmtUSD(Math.max.apply(null,realCaps)/100)))) : 'sem limite';
+    /* Mesma detecção CONFIÁVEL da tabela: DIÁRIA = spend_cap; VITALÍCIA = flags (_hasCap/_capTotal/_capUnknown).
+       NUNCA "sem limite" sem confirmar os conjuntos -> "verificando…" no lugar. */
+    var isLifeD = lbCentsD > 0;
+    var scD = (camp.spend_cap != null && camp.spend_cap !== '') ? parseInt(camp.spend_cap) : 0;
+    var hasCampCapD = scD > 0 && scD < 900000000000000;
+    var cappedD = isLifeD ? !!camp._hasCap : hasCampCapD;
+    var capCurTxt = cappedD
+      ? ('teto ' + fmtUSD((isLifeD ? (camp._capTotalCents || 0) : scD) / 100))
+      : ((isLifeD && camp._capUnknown) ? '⏳ verificando…' : 'sem limite');
     var rememberedD = getDayCap(camp);
     var capPre = rememberedD > 0 ? Math.round(rememberedD) : '';
     body += '<div class="det-row" style="align-items:center"><span class="det-k">Rodar hoje ($)</span>'
@@ -3502,14 +3541,23 @@ html,body{background:#fbfcfd!important}
      TOTAL efetivo dos tetos ativos (camp._capTotalCents) p/ mostrar no selo. Diário NÃO usa isto (usa spend_cap). */
   function recomputeLifeCap(camp) {
     var lbCents = parseInt(camp.lifetime_budget) || 0;
-    if (lbCents <= 0) { camp._hasCap = false; camp._capTotalCents = 0; return; }
-    var capped = false, capSum = 0;
-    (camp._adsets || []).forEach(function(s) {
-      var stt = (s.effective_status || '').toUpperCase();
+    if (lbCents <= 0) { camp._hasCap = false; camp._capTotalCents = 0; camp._capUnknown = false; return; }
+    /* Detecta o teto em QUALQUER conjunto NÃO-arquivado (não só ATIVO): campanha limitada cujo conjunto
+       capado ficou pausado/em-análise NÃO pode virar "sem limite" (evita falso negativo). Total efetivo do
+       selo prioriza os ATIVOS; se só houver capado pausado, usa a soma dos capados. */
+    var sets = (camp._adsets || []).filter(function(s){ var st = (s.effective_status || '').toUpperCase(); return st !== 'ARCHIVED' && st !== 'DELETED'; });
+    var capped = false, capSumAll = 0, capSumActive = 0;
+    sets.forEach(function(s) {
+      var st = (s.effective_status || '').toUpperCase();
       var cap = (s.lifetime_spend_cap != null) ? +s.lifetime_spend_cap : 0;
-      if (stt === 'ACTIVE' && cap > 0 && cap < lbCents * 0.98) { capSum += cap; capped = true; }
+      if (cap > 0 && cap < lbCents * 0.98) { capped = true; capSumAll += cap; if (st === 'ACTIVE') capSumActive += cap; }
     });
-    camp._hasCap = capped; camp._capTotalCents = capSum;
+    camp._hasCap = capped; camp._capTotalCents = capSumActive > 0 ? capSumActive : capSumAll;
+    /* ⚠️ NÃO CONFIRMADO: campanha vitalícia ENTREGANDO mas SEM NENHUM conjunto carregado = o lote da Meta
+       perdeu os conjuntos (rate limit). NUNCA afirmar "sem limite" aqui (era o falso "normal"): marca
+       _capUnknown p/ o dash mostrar "verificando…" até o fillMissingAdsets confirmar. */
+    var eff = (camp.effective_status || camp.status || '').toUpperCase();
+    camp._capUnknown = !capped && !sets.length && (eff === 'ACTIVE' || eff === 'WITH_ISSUES');
   }
   /* Aplica o spend_cap na CAMPANHA (centavos). Se a Meta recusar por estar ABAIXO DO MÍNIMO ("must be at least $X"
      / "pelo menos $X" / "too low"), LÊ o mínimo da mensagem e REAPLICA com ele — até 4x. Devolve os centavos
@@ -3776,9 +3824,12 @@ html,body{background:#fbfcfd!important}
     /* DIÁRIO: teto = spend_cap da campanha. VITALÍCIA: teto = limite de gasto do(s) conjunto(s) (_hasCap/_capTotal),
        lido direto da Meta -> selo NUNCA falso; some quando o teto sobe p/ o orçamento total (remover). */
     var isCapped = isLifeC ? !!camp._hasCap : hasCampCap;
+    /* ⚠️ NÃO afirmar "sem limite" sem ter confirmado os conjuntos (vitalícia): se o lote perdeu os conjuntos,
+       mostra "verificando…" (nunca info falsa). O fillMissingAdsets confirma logo e re-renderiza. */
+    var capUnknown = isLifeC && !isCapped && !!camp._capUnknown;
     var tetoTxt = isCapped
       ? ('🔒 LIMITADA · teto ' + fmtUSD((isLifeC ? (camp._capTotalCents || 0) : scNum) / 100))
-      : 'sem limite';
+      : (capUnknown ? '⏳ verificando limite…' : 'sem limite');
     var remembered = getDayCap(camp); /* ultimo "rodar hoje" salvo */
     var preVal = remembered > 0 ? Math.round(remembered) : '';
     var madV = ISOLATED ? 0 : madValueFor(camp);      /* valor efetivo (global ou exceção) */
@@ -3792,7 +3843,7 @@ html,body{background:#fbfcfd!important}
       + '<button class="save-btn" id="cspendbtn_' + i + '" style="padding:4px 8px" title="Aplicar: roda +esse valor hoje e para. Fica salvo p/ amanhã.">&#10003;</button>'
       + '</div>'
       + '<button id="climitnow_' + i + '" style="font-size:10px;font-weight:700;white-space:nowrap;color:#fff;background:#cf5b12;border:none;border-radius:5px;padding:5px 8px;cursor:pointer" title="Para AGORA no gasto atual da campanha — não gasta mais nada">&#9940; Limitar agora</button>'
-      + '<span style="font-size:9px;font-weight:' + (isCapped ? '700' : '400') + ';color:' + (isCapped ? '#cf5b12' : '#656d76') + '" title="' + (isCapped ? 'campanha LIMITADA (teto de gasto aplicado)' : 'sem teto de gasto') + '">' + tetoTxt + '</span>'
+      + '<span style="font-size:9px;font-weight:' + (isCapped ? '700' : (capUnknown ? '700' : '400')) + ';color:' + (isCapped ? '#cf5b12' : (capUnknown ? '#9a6700' : '#656d76')) + '" title="' + (isCapped ? 'campanha LIMITADA (teto de gasto aplicado)' : (capUnknown ? 'não consegui ler os conjuntos ainda — confirmando se tem limite (não confie no “sem limite” até carregar)' : 'sem teto de gasto')) + '">' + tetoTxt + '</span>'
       + (isCapped ? '<button id="cspendrem_' + i + '" style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;color:#fff;background:#cf222e;border:none;border-radius:5px;padding:5px 8px;cursor:pointer" title="Remover o limite de gasto (volta a rodar sem teto)">Remover limite</button>' : '')
       + '</div>';
   }
