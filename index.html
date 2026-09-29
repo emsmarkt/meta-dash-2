@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-29.1</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-29.2</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -695,7 +695,8 @@ html,body{background:#fbfcfd!important}
   /* BATCH API GET: 1 chamada HTTP p/ ATÉ 50 objetos (MUITO menos rate limit que N chamadas soltas — era a
      causa do "NÃO carregou"/"verificando" em massa). relUrls = array de relative_url. Devolve array ALINHADO
      {ok, data, err}. Chunks de 50, SEQUENCIAL (não estoura conexões nem dispara #4/#17). */
-  function metaBatchGet(tk, relUrls) {
+  function metaBatchGet(tk, relUrls, _try) {
+    _try = _try || 0;
     var out = new Array(relUrls.length);
     var chunks = []; for (var k = 0; k < relUrls.length; k += 50) chunks.push({ start: k, arr: relUrls.slice(k, k + 50) });
     var seq = Promise.resolve();
@@ -717,7 +718,23 @@ html,body{background:#fbfcfd!important}
           .catch(function(e){ ch.arr.forEach(function(_, ix){ out[ch.start + ix] = { ok: false, err: (e && e.message) ? e.message : String(e) }; }); });
       });
     });
-    return seq.then(function(){ return out; });
+    return seq.then(function(){
+      /* RATE LIMIT #17/#4/#613/#80004 ("User request limit reached") abre sozinho em alguns segundos ->
+         ESPERA (8s, 16s, 24s) e RE-TENTA só os que bateram limite, até 3x. Roda em 2º plano (o dash já
+         renderizou), então o "NÃO carregou"/"verificando" some quando a janela reabre — sem estragar nada. */
+      var rlIdx = [];
+      out.forEach(function(r, ix){ if (r && !r.ok && /request limit|rate limit|reduce the amount|too many calls|#?17\b|#?4\b|#?613|#?80004|calls to this api/i.test(r.err || '')) rlIdx.push(ix); });
+      if (rlIdx.length && _try < 3) {
+        var wait = 8000 * (_try + 1);
+        return new Promise(function(res){ setTimeout(res, wait); }).then(function(){
+          return metaBatchGet(tk, rlIdx.map(function(ix){ return relUrls[ix]; }), _try + 1).then(function(retryOut){
+            rlIdx.forEach(function(ix, j){ if (retryOut[j] && retryOut[j].ok) out[ix] = retryOut[j]; });
+            return out;
+          });
+        });
+      }
+      return out;
+    });
   }
   function confirmEmptyAds(list) {
     /* SUSPEITA = campanha ENTREGANDO (ACTIVE/WITH_ISSUES) que ficou com erro de leitura, 0 anuncios TOTAIS
