@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-29.2</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-29.5</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -3718,27 +3718,28 @@ html,body{background:#fbfcfd!important}
        o sucesso passa a se basear no stop_time da campanha. */
     var STRUCT = /unsupported post request|does not exist|cannot be loaded|missing permission|does not support this operation|nonexisting field|não é possível|nao e possivel/i;
     var dayOf = function(v){ if (!v) return null; return (typeof v === 'string') ? v.slice(0,10) : new Date(v*1000).toISOString().split('T')[0]; };
-    /* SO conjuntos ATIVOS (pedido do usuario 21/09): nao mexe em pausado/rejeitado/arquivado. */
-    var isActiveSet = function(s){ return (s.effective_status || '').toUpperCase() === 'ACTIVE'; };
-    /* FALLBACK: conjuntos JA carregados na tabela (camp._adsets) — SO os ATIVOS. Usado quando a Meta CORTA
-       a busca dos conjuntos ("anuncios NAO carregou") — muda a data mesmo assim, como pedido. */
+    /* TODOS os conjuntos EDITÁVEIS = tudo que NÃO é arquivado/excluído (ATIVO **E PAUSADO**). Motivo (descoberto
+       29/09 lendo ao vivo): em CBO a data da CAMPANHA fica presa ao conjunto que termina MAIS TARDE. Se um
+       conjunto pausado ficar na data antiga (mais longe), a campanha NÃO encurta → o diário não sobe. Então
+       precisamos mover TODOS os conjuntos, inclusive os pausados. */
+    var isEditableSet = function(s){ var st = (s.effective_status || '').toUpperCase(); return st !== 'ARCHIVED' && st !== 'DELETED'; };
+    /* FALLBACK: conjuntos JA carregados na tabela (camp._adsets) — os EDITÁVEIS. Usado quando a Meta CORTA a busca. */
     var fromPre = function(){
-      return ((preAdsets || []).filter(isActiveSet))
+      return ((preAdsets || []).filter(isEditableSet))
         .map(function(s){ return { id: s.id, name: s.name || s.id, end_time: s.end_time }; });
     };
     function listSets() {
-      /* SO conjuntos ATIVOS (pedido do usuario): busca os conjuntos e fica so com effective_status === ACTIVE.
-         Nao mexe em pausado/rejeitado/arquivado/em-analise. Se a Meta cortar a busca -> usa os ATIVOS ja
-         carregados na tabela (fromPre). */
+      /* Busca os conjuntos e fica com os EDITÁVEIS (não-arquivados) — ATIVOS E PAUSADOS. Se a Meta cortar a
+         busca -> usa os já carregados na tabela (fromPre). */
       return withTokenFallback(useTk, function(t){ return fjThrow(API+'/'+campId+'/adsets?fields=id,name,end_time,effective_status&limit=200&access_token='+t); })
         .then(function(r){
           useTk = r.tk; if (onTk) onTk(useTk);
           var all = (r.result && r.result.data) || [];
-          var live = all.filter(isActiveSet); /* SO os ATIVOS */
-          if (!live.length) return fromPre(); /* busca vazia -> usa os ATIVOS ja carregados na tabela */
+          var live = all.filter(isEditableSet); /* ATIVOS + PAUSADOS (não arquivados) */
+          if (!live.length) return fromPre(); /* busca vazia -> usa os já carregados na tabela */
           return live;
         })
-        .catch(function(){ return fromPre(); }); /* a Meta cortou a busca dos conjuntos -> usa os ja carregados */
+        .catch(function(){ return fromPre(); }); /* a Meta cortou a busca -> usa os já carregados */
     }
     /* Aplica o end_time via BATCH API (lotes de 50, 1 chamada HTTP p/ VARIOS conjuntos = objetos DIFERENTES).
        Isso evita o limite "1 call por 30s por OBJETO" (#613) que os POSTs um-a-um disparavam. Token pinado
@@ -3831,19 +3832,40 @@ html,body{background:#fbfcfd!important}
         .then(function(r){ useTk = r.tk; if (onTk) onTk(useTk); return dayOf(r.result && r.result.stop_time); })
         .catch(function(){ return null; });
     }
-    function round(n) {
-      return post().then(function() {
-        /* POST ACEITO (200): NAO re-posta. O read-back pode atrasar ~1 min (propagacao); re-postar na
-           MESMA campanha em <30s dispara o #613 (1 call/30s por objeto). So confere 1x e devolve. */
-        if (postOk) {
-          return check().then(function(day) { return { ok: day === wantDay, postOk: true, campDay: day, err: null }; });
-        }
-        /* POST FALHOU (erro real; rate-limit ja foi retentado dentro do postForm). Espera e tenta de novo. */
-        if (n < 2) return new Promise(function(r){ setTimeout(r, 8000); }).then(function(){ return round(n + 1); });
-        return check().then(function(day) { return { ok: day === wantDay, postOk: false, campDay: day, err: err }; });
-      });
+    /* CONFIRMAÇÃO REAL: depois do POST aceito, RELÊ a data várias vezes (até ~25s) e só devolve ok=true quando
+       a Meta REALMENTE mudou (read-back == data pedida). GET repetido NÃO dispara #613 (isso é só p/ escrita).
+       Se aceitou (200) mas NUNCA confirmou = a Meta manteve a data antiga (trava de fim de vida da vitalícia
+       perto do fim, ou sem permissão) -> ok=false, postOk=true -> o dash avisa "aceitou mas NÃO mudou". */
+    /* Confirma com TOLERÂNCIA de ±1 dia: a Meta guarda/devolve o stop_time no fuso DA CONTA, então a data lida
+       pode "virar" 1 dia vs a data pedida em BR — isso é a MESMA mudança (não é falha). Uma mudança REAL de
+       escala é de vários dias, então ±1 não gera falso positivo. */
+    function dayClose(a, b) {
+      if (!a || !b) return false;
+      if (a === b) return true;
+      var da = new Date(a + 'T12:00:00Z'), db = new Date(b + 'T12:00:00Z');
+      return Math.abs(da - db) <= 86400000 + 1000; /* <= 1 dia */
     }
-    return round(0);
+    function pollConfirm() {
+      var waits = [1500, 3000, 5000, 7000, 9000]; /* ~25s no total */
+      var i = 0;
+      function step() {
+        return check().then(function(day) {
+          if (dayClose(day, wantDay)) return { ok: true, postOk: true, campDay: day, err: null };
+          if (i >= waits.length) return { ok: false, postOk: true, campDay: day, err: null };
+          var w = waits[i++];
+          return new Promise(function(r){ setTimeout(r, w); }).then(step);
+        });
+      }
+      return step();
+    }
+    return post().then(function() {
+      if (postOk) return pollConfirm();
+      /* POST FALHOU de verdade (erro real; rate-limit já retentado no postForm). Espera 8s e tenta 1x mais. */
+      return new Promise(function(r){ setTimeout(r, 8000); }).then(post).then(function() {
+        if (postOk) return pollConfirm();
+        return { ok: false, postOk: false, campDay: null, err: err };
+      });
+    });
   }
 
   /* Celula "Limite lance": ciente da ESTRATEGIA de lance da campanha (bid_strategy).
@@ -4004,67 +4026,63 @@ html,body{background:#fbfcfd!important}
 
     var useTk = camp._tk;
     var brDay = function(d){ return d ? String(d).split('-').reverse().join('/') : '?'; };
-    /* ===== CBO: campanha e conjunto ficam TRAVADOS na mesma data (end_time do conjunto <= stop_time da
-       campanha E stop_time da campanha <= maior end_time dos conjuntos). Pra ESTENDER (data pra frente, diario
-       MENOR) tem que subir o TETO primeiro: CAMPANHA -> depois CONJUNTOS. Pra ENCURTAR (data pra tras, diario
-       MAIOR): CONJUNTOS primeiro -> depois CAMPANHA. A ordem fixa antiga (conjuntos primeiro) fazia a Meta
-       cortar no teto e "nao mudar nada" ao estender. SUCESSO = escrita ACEITA (200), mesmo que o read-back
-       demore a refletir (a Meta aceita o POST e propaga em ~1 min). */
+    /* ===== CBO: a data da CAMPANHA fica PRESA ao conjunto que termina mais TARDE. Então, pra mudar o término
+       DE VERDADE (e o diário), mexemos em TODOS os conjuntos editáveis (ativo + PAUSADO) E na campanha.
+       ORDEM: ENCURTAR = conjuntos primeiro (baixa o teto) -> campanha; ESTENDER = campanha (levanta o teto)
+       -> conjuntos. SUCESSO = o stop_time da CAMPANHA confirmar a data nova (é o que governa o pacing). */
+    var campRes = null, setSt = null;
     var oldDay = camp.stop_time ? dayOf(camp.stop_time) : null;
-    var extend = !oldDay || wantDay > oldDay; /* mover pra FRENTE (estender) */
-    var campRes = null;
+    var shorten = !!(oldDay && wantDay < oldDay); /* data pra trás = encurtar = diário maior */
     var doCamp = function(){ return applyCampaignStopTime(camp.id, endTs, useTk, wantDay, function(t){ useTk = t; camp._tk = t; }).then(function(r){ campRes = r; return r; }); };
-    var doSets = function(){ return applyEndToAdsets(camp.id, useTk, endIso, wantDay, function(t){ useTk = t; camp._tk = t; }, camp._adsets); };
-    /* estender: campanha (levanta o teto) -> conjuntos -> RECONFIRMA a campanha SO se havia conjunto EDITAVEL
-       (teto de conjunto a vencer). Em CBO vitalicio (conjuntos sem end_time proprio -> st.total===0) a 2a
-       escrita na campanha e INUTIL e dispara o #613 (1 call/30s por objeto) -> pula. encurtar: conjuntos -> campanha. */
-    var seq = extend
-      ? doCamp().then(doSets).then(function(st){ return (st && st.total > 0) ? doCamp().then(function(){ return st; }) : st; })
-      : doSets().then(function(st){ return doCamp().then(function(){ return st; }); });
-    seq
-      .then(function(st){
-        setTotal = st.total; setOk = st.ok; setFails = st.fails || [];
-        var setUnsup = (st.unsupported || []).length; /* conjuntos que nao editam end_time (CBO -> agenda na campanha) */
-        if (setTotal) report.push('Conjuntos: ' + setOk + '/' + setTotal);
-        if (setUnsup) report.push(setUnsup + ' conjunto(s) sem data própria (CBO — agenda na campanha)');
-        setFails.forEach(function(m){ report.push('  - conjunto -> ' + m); });
-        if (campRes) report.push('Campanha: ' + (campRes.ok ? 'confirmada' : (campRes.postOk ? 'aceita (propagando)' : ('erro: ' + (campRes.err || '?')))));
-
-        /* ERRO REAL (falha a operacao) = erro de POST em conjunto OU no stop_time da campanha. */
-        var realErr = (st.postErrs && st.postErrs.length) || (campRes && !campRes.ok && !campRes.postOk && campRes.err);
-        /* ACEITO = nenhum erro real; a Meta recebeu as escritas (read-back pode demorar ~1 min). */
-        var accepted = !realErr && (setTotal > 0 || (campRes && campRes.postOk));
-        /* CONFIRMADO = read-back ja bateu (conjuntos na data E/OU campanha na data). */
-        var confirmed = (setTotal > 0 && setOk >= setTotal) || (campRes && campRes.ok);
-
-        if (accepted) {
-          camp.stop_time = endTs; /* display: campanha passa a valer a nova data */
-          if (btn) { btn.textContent = confirmed ? 'Aplicado!' : 'Aplicando…'; btn.style.background = '#1a7f37'; btn.style.borderColor = '#1a7f37'; }
+    var doSets = function(){ return applyEndToAdsets(camp.id, useTk, endIso, wantDay, function(t){ useTk = t; camp._tk = t; }, camp._adsets).then(function(s){ setSt = s; return s; }); };
+    (shorten ? doSets().then(doCamp) : doCamp().then(doSets))
+      .then(function(){
+        var confirmed = campRes && campRes.ok;                             /* read-back CONFIRMOU a data nova NA META */
+        var acceptedNoChange = campRes && !campRes.ok && campRes.postOk;    /* Meta aceitou (200) mas MANTEVE a antiga */
+        /* ✅ SÓ diz "Aplicado" quando a Meta REALMENTE mudou (confirmado lendo de volta). Nada de verde otimista. */
+        if (confirmed) {
+          camp.stop_time = endTs; /* agora É verdade: a Meta mudou */
+          /* reflete o novo end_time nos conjuntos editáveis já carregados (display coerente com o gerenciador) */
+          (camp._adsets || []).forEach(function(s){ var stt=(s.effective_status||'').toUpperCase(); if (stt!=='ARCHIVED' && stt!=='DELETED') s.end_time = endIso; });
+          if (btn) { btn.textContent = 'Aplicado!'; btn.style.background = '#1a7f37'; btn.style.borderColor = '#1a7f37'; }
           if (camp._sugSig) setAppliedRule(camp.id, camp._sugSig, camp._sugAction);
           var _sigH = fromRule ? camp._sugSig : 'MANUAL';
           var _actH = fromRule ? camp._sugAction : ('Ajuste manual de termino' + (histDailyNew ? ' (~$' + Math.round(histDailyNew) + '/dia)' : ''));
           logRuleHist(camp, _sigH, _actH, { dailyOld: histDailyOld > 0 ? histDailyOld : null, dailyNew: histDailyNew, endOld: histEndOld, endNew: dateVal });
-          notifyOk('Aplicado em "' + camp.name + '"',
-            'Término ' + brDay(dateVal) + (setTotal ? (' · ' + setOk + '/' + setTotal + ' conjuntos') : '') + (histDailyNew ? ' · diário ~$' + Math.round(histDailyNew) : '') + (confirmed ? '' : ' · a Meta pode levar ~1 min pra refletir'));
+          var setMsg = (setSt && setSt.total) ? (' · ' + setSt.ok + '/' + setSt.total + ' conjuntos') : '';
+          notifyOk('Aplicado em "' + camp.name + '" — CONFIRMADO na Meta',
+            'Término ' + brDay(dateVal) + setMsg + (histDailyNew ? ' · diário ~$' + Math.round(histDailyNew) : ''));
           if (curTab === 'orc') renderOrc();
           if (curTab === 'hist') renderHist();
           renderCBO();
           setTimeout(function() { var b2 = document.getElementById('csavebtn_'+i); if (b2) { b2.disabled = false; b2.textContent = 'Aplicar'; b2.style.background = ''; b2.style.borderColor = ''; } }, 3000);
           return;
         }
-
-        /* ERRO REAL -> botao vermelho + aviso. */
+        if (acceptedNoChange) {
+          /* ⚠️ NÃO é sucesso: a Meta aceitou o POST mas, após ~25s relendo, manteve a data antiga. NÃO marca
+             verde, NÃO altera o display, NÃO loga. Fala a verdade + O QUE está travando (não deixa você achar que escalou). */
+          var keptDay = campRes && campRes.campDay ? brDay(campRes.campDay) : 'a antiga';
+          var blockers = setSt ? (setSt.unsupported || []).concat(setSt.postErrs || []).concat(setSt.stale || []) : [];
+          var setInfo = '';
+          if (setSt && setSt.ok && setSt.total) setInfo += ' (' + setSt.ok + '/' + setSt.total + ' conjuntos mudaram)';
+          var motivo = blockers.length
+            ? ('A Meta NÃO deixou mudar a data de: ' + blockers.slice(0,3).join('; ') + '. Em CBO a campanha fica presa ao conjunto que termina MAIS TARDE — enquanto esse(s) não mudar(em), a data não desce. Tente ATIVAR esse conjunto e aplicar de novo, ou mude a data dele no gerenciador.')
+            : ('Costuma ser a trava de fim de vida da vitalícia. Pra escalar: aumente o ORÇAMENTO total (lápis na coluna Orçamento) ou duplique a campanha.');
+          if (btn) { btn.disabled = false; btn.textContent = 'NÃO mudou'; btn.style.background = '#9a6700'; btn.style.borderColor = '#9a6700'; }
+          setTimeout(function() { if (btn) { btn.textContent = 'Aplicar'; btn.style.background = ''; btn.style.borderColor = ''; } }, 7000);
+          notifyErr('A Meta NÃO mudou o término de "' + camp.name + '"' + setInfo,
+            'A campanha ficou em ' + keptDay + ' (conferi por 25s). ' + motivo + ' NÃO confie que mudou — não mudou.');
+          renderCBO();
+          return;
+        }
+        /* ERRO REAL no stop_time da campanha -> botao vermelho + aviso com o erro exato da Meta. */
         if (btn) { btn.disabled = false; btn.textContent = 'Erro!'; btn.style.background = '#cf222e'; btn.style.borderColor = '#cf222e'; }
         setTimeout(function() { if (btn) { btn.textContent = 'Aplicar'; btn.style.background = ''; btn.style.borderColor = ''; } }, 4000);
-        var tokenBad = /application has been deleted|validating application|access token|session.*expired|OAuth|code 190/i.test(report.join(' '));
-        if (setTotal === 0 && !(campRes && campRes.postOk)) {
-          notifyErr('Nenhum conjunto ativo em "' + camp.name + '"',
-            'Não achei conjunto com anúncio ativo p/ mudar a data (ou a Meta cortou a busca). Recarregue as campanhas e tente de novo.' + (tokenBad ? ' TOKEN INVÁLIDO: gere um novo em Tokens.' : ''));
-        } else {
-          var em = (st.postErrs && st.postErrs[0]) || (campRes && campRes.err) || '';
-          notifyErr('Erro ao aplicar data em "' + camp.name + '"',
-            'A Meta recusou a escrita. ' + em + ' Clique Aplicar de novo.' + (tokenBad ? ' TOKEN INVÁLIDO.' : ''));
-        }
+        var em = (campRes && campRes.err) || '';
+        var tokenBad = /application has been deleted|validating application|access token|session.*expired|OAuth|code 190/i.test(em);
+        var rateLtd = /request limit|rate limit|#?17\b|#?613|too many calls|calls to this api/i.test(em);
+        notifyErr('Erro ao aplicar data em "' + camp.name + '"',
+          'A Meta recusou mudar o término. ' + em + (rateLtd ? ' (limite momentâneo da conta — espere ~30s e clique de novo)' : ' Clique Aplicar de novo.') + (tokenBad ? ' TOKEN INVÁLIDO: gere um novo em Tokens.' : ''));
       })
       .catch(function(e) {
         if (btn) { btn.disabled = false; btn.textContent = 'Erro!'; btn.style.background = '#cf222e'; btn.style.borderColor = '#cf222e'; }
