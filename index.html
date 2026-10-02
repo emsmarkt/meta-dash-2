@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-10-02.4</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-10-02.6</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -2146,15 +2146,11 @@ html,body{background:#fbfcfd!important}
       var _cmp = sales >= RULES.aumMaxSales ? ' campea s/ aumento ha ' + (_incDays >= 9999 ? 'nunca' : _incDays + 'd') + ',' : '';
       return { action: 'AUMENTAR diario p/ $' + Math.round(tgtA) + ' (' + RULES.aumMult + 'x —' + _cmp + ' ROAS hoje ' + roasFmt + ', 7d ' + (camp._roas7d || 0).toFixed(2).replace('.', ',') + ', apos ' + RULES.aumHourBR + 'h)', cls: 'd-good', target: tgtA, newEnd: neA, key: 'AUMENTAR', sig: 'AUMENTAR' };
     }
-    /* SEM VENDA hoje (venda SO do RedTrack): gastou >= cutNoSaleSpend($100) -> CORTA (+364d). */
-    if (sales === 0 && sp >= RULES.cutNoSaleSpend) return { action: 'CORTAR (+' + RULES.cutDays + 'd — $' + Math.round(sp) + ' hoje SEM venda)', cls: 'd-bad', target: cortarTarget, newEnd: cortarEnd, key: 'CORTAR', sig: 'CORTAR' };
+    /* SEM VENDA hoje: só "Coletando" (sugestão de CORTE removida a pedido do usuário 02/10). */
     if (sales === 0) return { action: 'Coletando (sem venda)', cls: 'd-warn', target: null, newEnd: null, key: 'COLETANDO', sig: null };
-    /* COM VENDA e menos de aumMaxSales(5) vendas: ROAS < limRoas(1,4) -> CORTAR (+cutDays, reduz ritmo);
-       1,4 <= ROAS < pauseRoas(1,5) -> PAUSAR (esperar o REBOTE da atribuicao 1h08; robo avisa p/ reativar antes de 1h). */
-    if (sales < RULES.aumMaxSales && sp > RULES.limMinSpend) {
-      if (roas < RULES.limRoas) return { action: 'REDUZIR RITMO (+' + RULES.cutDays + 'd — ROAS ' + roasFmt + ' < ' + RULES.limRoas.toFixed(1).replace('.', ',') + ', ' + sales + ' venda)', cls: 'd-bad', target: cortarTarget, newEnd: cortarEnd, key: 'CORTAR', sig: 'CORTAR' };
-      if (roas < RULES.pauseRoas) return { action: 'PAUSAR — esperar rebote (ROAS ' + roasFmt + ' < ' + pauseRoasTxt + ', ' + sales + ' venda)', cls: 'd-bad', target: null, newEnd: null, key: 'PAUSAR', sig: 'PAUSAR' };
-    }
+    /* 🚫 Sugestões "REDUZIR RITMO" (CORTAR) e "PAUSAR" REMOVIDAS (02/10) — gestão 100% manual. O ROAS baixo já é
+       sinalizado pela cor/🔴 da coluna ROAS e pelo alerta no Telegram; campanha com venda cai direto em MANTER.
+       (cortarTarget/cortarEnd/pauseRoasTxt ficam só p/ outras sugestões, se usadas.) */
     /* CAMPEA: >= aumMaxSales(5) vendas -> NUNCA corta (gestao manual, robo nao freia). Escala se ROAS alto. */
     if (sales > RULES.aumMaxSales) return { action: 'MANTER (>' + RULES.aumMaxSales + ' vendas, ROAS ' + roasFmt + ' — gestao manual)', cls: 'd-good', target: null, newEnd: null, key: 'MANTER', sig: null };
     /* ROAS >= 1,5 mas fora da janela AUMENTAR (antes das 20h, ou 7d <= 1,4): MANTER (nao mexe). */
@@ -4047,44 +4043,30 @@ html,body{background:#fbfcfd!important}
 
     var useTk = camp._tk;
     var brDay = function(d){ return d ? String(d).split('-').reverse().join('/') : '?'; };
-    /* ===== CBO: a data da CAMPANHA fica PRESA ao conjunto que termina mais TARDE. Então, pra mudar o término
-       DE VERDADE (e o diário), mexemos em TODOS os conjuntos editáveis (ativo + PAUSADO) E na campanha.
-       ORDEM: ENCURTAR = conjuntos primeiro (baixa o teto) -> campanha; ESTENDER = campanha (levanta o teto)
-       -> conjuntos. SUCESSO = o stop_time da CAMPANHA confirmar a data nova (é o que governa o pacing). */
-    var campRes = null, setSt = null;
-    var oldDay = camp.stop_time ? dayOf(camp.stop_time) : null;
-    var shorten = !!(oldDay && wantDay < oldDay); /* data pra trás = encurtar = diário maior */
-    var doCamp = function(){ return applyCampaignStopTime(camp.id, endTs, useTk, wantDay, function(t){ useTk = t; camp._tk = t; }).then(function(r){ campRes = r; return r; }); };
-    var doSets = function(){ return applyEndToAdsets(camp.id, useTk, endIso, wantDay, function(t){ useTk = t; camp._tk = t; }, camp._adsets).then(function(s){ setSt = s; return s; }); };
-    (shorten ? doSets().then(doCamp) : doCamp().then(doSets))
-      .then(function(){
-        /* ✅ RE-CHECK AUTORITATIVO: depois de TODAS as escritas, lê de novo a campanha + os conjuntos (a ordem e
-           a propagação não enganam mais). SUCESSO REAL = TODOS os conjuntos editáveis na data nova (é o que manda
-           no DELIVERY) E a campanha na data nova. Se tiver conjunto editável e NEM TODOS mudaram -> NÃO APLICOU
-           (erro vermelho claro). 0/N = não aplicou em nenhum = ERRO. */
-        var dayClose2 = function(a, b){ if (!a || !b) return false; if (a === b) return true; var da=new Date(a+'T12:00:00Z'), db=new Date(b+'T12:00:00Z'); return Math.abs(da-db) <= 86400000 + 1000; };
-        return Promise.all([
-          fjRetry(API + '/' + camp.id + '?fields=stop_time&access_token=' + useTk),
-          fjRetry(API + '/' + camp.id + '/adsets?fields=id,name,effective_status,end_time&limit=200&access_token=' + useTk)
-        ]).then(function(res){
-          var campDay = dayOf(res[0] && res[0].stop_time);
-          var campOk = dayClose2(campDay, wantDay);
-          var sets = (res[1] && res[1].data) || [];
-          var editable = sets.filter(function(s){ var stt=(s.effective_status||'').toUpperCase(); return stt!=='ARCHIVED' && stt!=='DELETED'; });
-          var setOk = editable.filter(function(s){ return dayClose2(dayOf(s.end_time), wantDay); }).length;
+    /* ===== ✅ TÉRMINO SÓ PELOS CONJUNTOS DE ANÚNCIOS (pedido do usuário 02/10): NÃO toca mais no stop_time da
+       CAMPANHA (era a fonte de #613/clamp/falso verde). Muda o end_time de TODOS os conjuntos editáveis
+       (ATIVO + PAUSADO), UMA escrita por conjunto (sem re-post = sem #613). O fim efetivo da campanha segue o
+       conjunto que termina mais tarde. SUCESSO = TODOS os conjuntos editáveis na data nova (re-lido da Meta). */
+    var setSt = null;
+    var dayClose2 = function(a, b){ if (!a || !b) return false; if (a === b) return true; var da=new Date(a+'T12:00:00Z'), db=new Date(b+'T12:00:00Z'); return Math.abs(da-db) <= 86400000 + 1000; };
+    applyEndToAdsets(camp.id, useTk, endIso, wantDay, function(t){ useTk = t; camp._tk = t; }, camp._adsets)
+      .then(function(s){ setSt = s;
+        /* RE-CHECK autoritativo SÓ dos conjuntos: relê o end_time de todos (ordem/propagação não enganam). */
+        return fjRetry(API + '/' + camp.id + '/adsets?fields=id,name,effective_status,end_time&limit=200&access_token=' + useTk).then(function(v){
+          var sets = (v && v.data) || [];
+          var editable = sets.filter(function(st2){ var stt=(st2.effective_status||'').toUpperCase(); return stt!=='ARCHIVED' && stt!=='DELETED'; });
+          var setOk = editable.filter(function(st2){ return dayClose2(dayOf(st2.end_time), wantDay); }).length;
           var setTot = editable.length;
-          /* com conjuntos editáveis -> TODOS + campanha. sem conjuntos editáveis (CBO puro) -> só a campanha. */
-          var realOk = setTot > 0 ? (setOk >= setTot && campOk) : campOk;
+          var realOk = setTot > 0 && setOk >= setTot; /* TODOS os conjuntos editáveis na data nova */
           if (realOk) {
-            camp.stop_time = endTs;
-            editable.forEach(function(s){ var m = (camp._adsets||[]).filter(function(x){ return x.id===s.id; })[0]; if (m) m.end_time = endIso; });
+            camp.stop_time = endTs; /* fim efetivo segue os conjuntos -> reflete no display */
+            editable.forEach(function(st2){ var m = (camp._adsets||[]).filter(function(x){ return x.id===st2.id; })[0]; if (m) m.end_time = endIso; });
             if (btn) { btn.textContent = 'Aplicado!'; btn.style.background = '#1a7f37'; btn.style.borderColor = '#1a7f37'; }
             if (camp._sugSig) setAppliedRule(camp.id, camp._sugSig, camp._sugAction);
             var _sigH = fromRule ? camp._sugSig : 'MANUAL';
-            var _actH = fromRule ? camp._sugAction : ('Ajuste manual de termino' + (histDailyNew ? ' (~$' + Math.round(histDailyNew) + '/dia)' : ''));
+            var _actH = fromRule ? camp._sugAction : ('Ajuste manual de termino (conjuntos)' + (histDailyNew ? ' (~$' + Math.round(histDailyNew) + '/dia)' : ''));
             logRuleHist(camp, _sigH, _actH, { dailyOld: histDailyOld > 0 ? histDailyOld : null, dailyNew: histDailyNew, endOld: histEndOld, endNew: dateVal });
-            var setMsg = setTot > 0 ? (' · ' + setOk + '/' + setTot + ' conjuntos') : '';
-            notifyOk('Aplicado em "' + camp.name + '" — CONFIRMADO na Meta', 'Término ' + brDay(dateVal) + setMsg + (histDailyNew ? ' · diário ~$' + Math.round(histDailyNew) : ''));
+            notifyOk('Aplicado em "' + camp.name + '" — CONFIRMADO (conjuntos)', 'Término ' + brDay(dateVal) + ' · ' + setOk + '/' + setTot + ' conjuntos' + (histDailyNew ? ' · diário ~$' + Math.round(histDailyNew) : ''));
             if (curTab === 'orc') renderOrc();
             if (curTab === 'hist') renderHist();
             renderCBO();
@@ -4092,15 +4074,16 @@ html,body{background:#fbfcfd!important}
             return;
           }
           /* ❌ NÃO APLICOU (total ou parcial) -> VERMELHO + motivo claro. Não marca verde, não loga, não muda display. */
-          var rateHit = (setSt && setSt.rate && setSt.rate.length) || /request limit|rate limit|#?17\b|#?613|too many calls|calls to this api/i.test((campRes && campRes.err) || '');
+          var rateHit = setSt && setSt.rate && setSt.rate.length;
           var blockers = setSt ? (setSt.unsupported || []).concat(setSt.postErrs || []).concat(setSt.stale || []) : [];
-          var tokenBad = /application has been deleted|validating application|access token|session.*expired|OAuth|code 190/i.test(((campRes && campRes.err) || '') + ' ' + blockers.join(' '));
+          var tokenBad = /application has been deleted|validating application|access token|session.*expired|OAuth|code 190/i.test(blockers.join(' '));
           var motivo;
           if (rateHit) motivo = 'A Meta limitou a frequência (#613 = 1 alteração por conjunto a cada 30s). ESPERE ~30 segundos e clique Aplicar DE NOVO — NÃO fique clicando rápido (cada clique reinicia os 30s).';
           else if (tokenBad) motivo = 'TOKEN INVÁLIDO — gere um novo em ⚙ Tokens e tente de novo.';
           else if (blockers.length) motivo = 'A Meta não deixou mudar: ' + blockers.slice(0,3).join('; ') + '. Tente ATIVAR esse conjunto, ou mude a data dele no gerenciador.';
           else if (setTot > 0 && setOk > 0) motivo = 'Só ' + setOk + '/' + setTot + ' conjuntos pegaram a data. Clique Aplicar de novo (espere 30s se repetir).';
-          else motivo = 'A Meta manteve a data antiga (trava de fim de vida da vitalícia, ou propagação). Confira em 1 min; se continuar, aumente o ORÇAMENTO total ou duplique a campanha.';
+          else if (setTot === 0) motivo = 'Não achei conjunto editável (ou a Meta cortou a leitura). Recarregue as campanhas e tente de novo.';
+          else motivo = 'A Meta manteve a data antiga (propagação ou trava). Confira em 1 min; se continuar, tente de novo.';
           if (btn) { btn.disabled = false; btn.textContent = 'NÃO aplicou'; btn.style.background = '#cf222e'; btn.style.borderColor = '#cf222e'; }
           setTimeout(function() { if (btn) { btn.textContent = 'Aplicar'; btn.style.background = ''; btn.style.borderColor = ''; } }, 8000);
           notifyErr('❌ NÃO APLICOU o término de "' + camp.name + '"' + (setTot > 0 ? (' — ' + setOk + '/' + setTot + ' conjuntos') : ''), motivo + ' (NÃO confie que mudou — não mudou.)');
