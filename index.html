@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-09-29.5</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-10-02.3</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -960,8 +960,14 @@ html,body{background:#fbfcfd!important}
     if (camp._adsErr) {
       return { cls:'b-a', txt:info.txt, group:info.group, issue:'Nao foi possivel ler os anuncios: ' + camp._adsErr + ' (recarregue p/ conferir)', isError:true, note:'anuncios: NAO carregou', noteCls:'warn' };
     }
-    /* Campanha entregando e sem NENHUM anuncio na campanha. */
+    /* Campanha entregando e sem NENHUM anuncio na campanha. TRAVA anti-falso: conjunto ATIVO SEMPRE tem anúncio,
+       então tot=0 COM conjunto ativo = leitura incompleta (gap/rate limit da Meta), NUNCA "sem anúncio". */
+    var hasActiveSet = (camp._adsets || []).some(function(s){ return (s.effective_status||'').toUpperCase()==='ACTIVE'; });
+    var setsLoaded = (camp._adsets || []).length > 0;
     if (camp._adsLoaded && tot === 0 && entregando) {
+      /* "SEM ANÚNCIO" SÓ quando os conjuntos CARREGARAM e NENHUM está ativo. Se tem conjunto ativo (sempre tem
+         anúncio) OU os conjuntos nem carregaram -> é leitura incompleta, mostra "recarregue" (nunca o falso alarme). */
+      if (hasActiveSet || !setsLoaded) return { cls:'b-a', txt:info.txt, group:info.group, issue:'Conjunto ativo (ou não carregado), mas a leitura dos anúncios veio incompleta (limite da Meta) — recarregue p/ conferir', isError:true, note:'anúncios: recarregue', noteCls:'warn' };
       return { cls:'b-r', txt:'SEM ANUNCIO', group:'active', issue:(issue ? issue + ' | ' : '') + 'Campanha ativa sem nenhum anuncio', isError:true, note:'0 anuncios', noteCls:'crit' };
     }
     if (camp._adsLoaded && tot > 0) {
@@ -1975,8 +1981,11 @@ html,body{background:#fbfcfd!important}
       var spendTxt = sp > 0 ? fmtUSD(sp) : '---';
       var salesTxt = hasC ? (sales > 0 ? sales.toLocaleString('pt-BR') : '0') : '---';
       var cpaTxt = cpaNum > 0 ? fmtUSD(cpaNum) : '---';
-      var roasCls = roasNum >= 1.5 ? 'd-good' : (roasNum >= 1.3 ? 'd-warn' : (roasNum > 0 ? 'd-bad' : ''));
-      var roasTxt = roasNum > 0 ? roasNum.toFixed(2).replace('.',',') : '---';
+      var roasCls = roasNum >= 1.5 ? 'd-good' : (roasNum > 1.3 ? 'd-warn' : (roasNum > 0 ? 'd-bad' : ''));
+      /* 🔴 AVISO VISUAL ROAS CRÍTICO (<= 1,3): marcador vermelho na célula (pareia com o alerta do Telegram). */
+      var roasCrit = roasNum > 0 && roasNum <= 1.3;
+      var roasTxt = roasNum > 0 ? ((roasCrit ? '🔴 ' : '') + roasNum.toFixed(2).replace('.',',')) : '---';
+      var roasTdAttr = roasCrit ? ' class="d-bad" style="font-weight:800" title="ROAS CRÍTICO (≤ 1,3) — verifique a campanha (avisado no Telegram)"' : (' class="'+roasCls+'"');
       var isErr = st.isError ? '1' : '0';
       return '<tr data-name="'+name.toLowerCase().replace(/"/g,'')+'" data-status="'+st.group+'" data-error="'+isErr+'">'
            + '<td style="text-align:left">'+name+'</td>'
@@ -1987,7 +1996,7 @@ html,body{background:#fbfcfd!important}
            + '<td>'+spendTxt+'</td>'
            + '<td>'+salesTxt+'</td>'
            + '<td>'+cpaTxt+'</td>'
-           + '<td class="'+roasCls+'">'+roasTxt+'</td>'
+           + '<td'+roasTdAttr+'>'+roasTxt+'</td>'
            + '</tr>';
     }).join('');
     if (tbody) tbody.innerHTML = rowsHtml;
@@ -3403,20 +3412,25 @@ html,body{background:#fbfcfd!important}
                 var verified = 0; Object.keys(wantById).forEach(function(id){ var got = byId[id] ? (+byId[id].lifetime_spend_cap || 0) : 0; if (got > 0 && Math.abs(got - wantById[id]) <= 300) verified++; });
                 if (!camp._hasCap || !verified) { notifyErr('Meta NÃO gravou o limite de "' + camp.name + '"', 'confirmei no gerenciador e o teto NÃO mudou. Tente de novo.'); renderCBO(); restore(); return; }
                 var effTot = Math.round((camp._capTotalCents || 0) / 100);
-                /* "LIMITAR AGORA": se a Meta forçou um mínimo ACIMA do gasto atual, o teto NÃO para a campanha agora
-                   → avisa e oferece PAUSAR (único jeito de parar de vez), conforme combinado. */
+                /* "LIMITAR AGORA": se a Meta forçou um mínimo ACIMA do gasto atual, NÃO para agora. Em vez de
+                   pausar, SUGERE aplicar o MÍNIMO da Meta como limite (pedido do usuário). OK = mantém o mínimo
+                   (já aplicado nos conjuntos ATIVOS); Cancelar = remove o teto (sobe p/ o orçamento). */
                 if (isStop && effTot > (sumAct * 1.1 + 5)) {
                   renderCBO();
-                  if (confirm('A Meta NÃO deixou travar "' + camp.name + '" no gasto atual.\nO mínimo que ela aceita é ~$' + effTot.toLocaleString('pt-BR') + ', mas você gastou só ~$' + Math.round(sumAct).toLocaleString('pt-BR') + ' → com esse teto a campanha NÃO para agora.\n\nQuer PAUSAR a campanha agora pra parar de vez? (você reativa quando quiser)')) {
-                    return postForm(camp.id, useTk, { status: 'PAUSED' }).then(function(){
-                      camp.status = 'PAUSED'; camp.effective_status = 'PAUSED';
-                      notifyOk('PAUSOU "' + camp.name + '"', 'A Meta não deixava travar no gasto atual (mínimo $' + effTot + '), então pausei p/ parar de vez. Reative quando quiser.');
-                      try { logRuleHist(camp, 'PAUSAR', 'Parar agora (Meta não deixou teto baixo — pausada)', { dailyOld: null, dailyNew: null, endOld: null, endNew: null }); } catch(e){}
-                      closeCboDetail(); renderCBO();
-                    }).catch(function(e){ notifyErr('Erro ao pausar "' + camp.name + '"', (e && e.message) ? e.message : String(e)); restore(); });
+                  if (confirm('Não dá pra travar "' + camp.name + '" exatamente no gasto atual (~$' + Math.round(sumAct).toLocaleString('pt-BR') + ').\nA Meta exige um limite MÍNIMO de ~$' + effTot.toLocaleString('pt-BR') + ' (nos conjuntos ativos).\n\nAplicar esse MÍNIMO ($' + effTot.toLocaleString('pt-BR') + ') como limite de gasto? A campanha para ao chegar nele.\n(Cancelar = remove o limite, segue sem teto.)')) {
+                    if (!isStop && addX > 0) { try { localStorage.setItem(daycapKey(camp), String(addX)); } catch(e){} }
+                    notifyOk('Limite MÍNIMO aplicado em "' + camp.name + '"', 'A Meta não deixa travar em $' + Math.round(sumAct) + '. Apliquei o mínimo dela: ~$' + effTot + ' (conjuntos ativos). A campanha para ao chegar nesse valor.');
+                    try { logRuleHist(camp, 'LIMITAR_GASTO', 'Limite mínimo da Meta (conj ~$' + effTot + ')', { dailyOld: null, dailyNew: null, endOld: null, endNew: null }); } catch(e){}
+                    closeCboDetail(); renderCBO();
+                    return;
                   }
-                  notifyOk('Teto aplicado em "' + camp.name + '"', 'Limite do(s) conjunto(s): ~$' + effTot + ' (mínimo da Meta). NÃO para agora — use Pausar se quiser parar de vez.');
-                  return;
+                  /* Cancelou -> REMOVE o teto: sobe o lifetime_spend_cap dos conjuntos ATIVOS p/ o orçamento total. */
+                  return Promise.all(act.map(function(s){ return capAdset(useTk, s.id, lbCents).catch(function(){}); })).then(function(){
+                    (camp._adsets || []).forEach(function(s){ if (act.indexOf(s) >= 0) s.lifetime_spend_cap = lbCents; });
+                    recomputeLifeCap(camp);
+                    notifyOk('Limite NÃO aplicado em "' + camp.name + '"', 'Você cancelou. Removi o teto (subiu p/ o orçamento total) — campanha segue sem limite.');
+                    closeCboDetail(); renderCBO();
+                  });
                 }
                 if (!isStop && addX > 0) { try { localStorage.setItem(daycapKey(camp), String(addX)); } catch(e){} }
                 notifyOk((isStop ? 'PAROU' : 'Limite (vitalícia) em') + ' "' + camp.name + '"', 'Limite de gasto do(s) conjunto(s): ~$' + effTot + ' — Meta confirmou' + (fail.length ? (' · ' + fail.length + ' conjunto(s) falhou') : '') + '. Orçamento intacto.' + (isStop ? '' : ' · salvo p/ amanhã'));
@@ -3440,19 +3454,22 @@ html,body{background:#fbfcfd!important}
           if (ok) {
             camp.spend_cap = String(got);
             var gotUsd = got / 100;
-            /* "PARAR AGORA": se a Meta forçou um teto mínimo ACIMA do gasto atual, não para agora → oferece PAUSAR. */
+            /* "PARAR AGORA": se a Meta forçou um teto mínimo ACIMA do gasto atual, não para agora. Em vez de pausar,
+               SUGERE aplicar o MÍNIMO da Meta como limite. OK = mantém o mínimo; Cancelar = remove o teto. */
             if (isStop && gotUsd > (campSpend * 1.1 + 5)) {
               renderCBO();
-              if (confirm('A Meta NÃO deixou travar "' + camp.name + '" no gasto atual.\nO mínimo aceito é ~$' + Math.round(gotUsd).toLocaleString('pt-BR') + ', mas você gastou só ~$' + Math.round(campSpend).toLocaleString('pt-BR') + ' → com esse teto a campanha NÃO para agora.\n\nQuer PAUSAR a campanha agora pra parar de vez? (reative quando quiser)')) {
-                return postForm(camp.id, useTk, { status: 'PAUSED' }).then(function(){
-                  camp.status = 'PAUSED'; camp.effective_status = 'PAUSED';
-                  notifyOk('PAUSOU "' + camp.name + '"', 'A Meta não deixava travar no gasto atual (mínimo $' + Math.round(gotUsd) + '), então pausei p/ parar de vez.');
-                  try { logRuleHist(camp, 'PAUSAR', 'Parar agora (Meta não deixou teto baixo — pausada)', { dailyOld: null, dailyNew: null, endOld: null, endNew: null }); } catch(e){}
-                  closeCboDetail(); renderCBO();
-                }).catch(function(e){ notifyErr('Erro ao pausar "' + camp.name + '"', (e && e.message) ? e.message : String(e)); restore(); });
+              if (confirm('Não dá pra travar "' + camp.name + '" exatamente no gasto atual (~$' + Math.round(campSpend).toLocaleString('pt-BR') + ').\nA Meta exige um teto MÍNIMO de ~$' + Math.round(gotUsd).toLocaleString('pt-BR') + '.\n\nAplicar esse MÍNIMO ($' + Math.round(gotUsd).toLocaleString('pt-BR') + ') como limite de gasto? A campanha para ao chegar nele.\n(Cancelar = remove o limite, segue sem teto.)')) {
+                notifyOk('Limite MÍNIMO aplicado em "' + camp.name + '"', 'A Meta não deixa travar em $' + Math.round(campSpend) + '. Apliquei o mínimo dela: $' + Math.round(gotUsd) + '. A campanha para ao chegar nesse valor.');
+                try { logRuleHist(camp, 'LIMITAR_GASTO', 'Limite mínimo da Meta (teto campanha $' + Math.round(gotUsd) + ')', { dailyOld: null, dailyNew: null, endOld: null, endNew: null }); } catch(e){}
+                closeCboDetail(); renderCBO();
+                return;
               }
-              notifyOk('Teto aplicado em "' + camp.name + '"', 'Teto da campanha: $' + Math.round(gotUsd) + ' (mínimo da Meta). NÃO para agora — use Pausar se quiser parar de vez.');
-              return;
+              /* Cancelou -> REMOVE o teto: spend_cap volta ao sentinela "sem limite". */
+              return postForm(camp.id, useTk, { spend_cap: MAD_NOCAP }).then(function(){
+                camp.spend_cap = String(MAD_NOCAP); setCapMark(camp.id, false); camp._hasCap = false;
+                notifyOk('Limite NÃO aplicado em "' + camp.name + '"', 'Você cancelou. Removi o teto — campanha segue sem limite.');
+                closeCboDetail(); renderCBO();
+              }).catch(function(e){ notifyErr('Erro ao remover o teto de "' + camp.name + '"', (e && e.message) ? e.message : String(e)); restore(); });
             }
             if (!isStop && addX > 0) { try { localStorage.setItem(daycapKey(camp), String(addX)); } catch(e){} }
             notifyOk((isStop ? 'PAROU' : 'Limite aplicado em') + ' "' + camp.name + '"', 'Teto da campanha: $' + Math.round(got/100) + ' — Meta confirmou' + (bumped ? ' (a Meta exigiu esse mínimo)' : '') + (isStop ? '' : ' · salvo p/ amanhã'));
@@ -3710,7 +3727,7 @@ html,body{background:#fbfcfd!important}
     /* postErrs = ERRO REAL de API (token/permissao/param) — falha de verdade. stale = a Meta ACEITOU o POST
        mas o read-back ainda mostra a data antiga (atraso de propagacao OU teto da campanha). accepted = nenhum
        erro real -> a escrita foi aceita (mesmo que o read-back demore). */
-    var st = { total: 0, ok: 0, fails: [], postErrs: [], stale: [], unsupported: [], accepted: true };
+    var st = { total: 0, ok: 0, fails: [], postErrs: [], stale: [], unsupported: [], rate: [], accepted: true };
     var useTk = tk;
     var skipIds = {}; /* conjuntos que NAO aceitam end_time (CBO lifetime: agenda so na campanha) -> nao re-tenta */
     /* Erro ESTRUTURAL do conjunto (nao e falha de token/rede/param): a Meta nao deixa editar end_time
@@ -3774,41 +3791,42 @@ html,body{background:#fbfcfd!important}
       });
       return seq.then(function(){ return errs; });
     }
-    /* Uma rodada: RE-LE os conjuntos, acha os PENDENTES (fora da data, nao-estruturais) e aplica em BATCH.
-       Retry ate 5x. Se o que sobrou for RATE LIMIT (#613 = 1 call/30s por objeto), espera MAIS (12s) p/ a
-       janela abrir; senao 2s. Assim o #613 vira sucesso na proxima rodada em vez de erro na tela. */
-    function round(n) {
-      return listSets().then(function(sets) {
-        if (!sets.length) return;
-        var pend = sets.filter(function(s){ return dayOf(s.end_time) !== wantDay && !skipIds[s.id]; });
-        if (!pend.length) { st.postErrs = []; return; } /* nada mais p/ escrever */
-        return batchEnd(pend).then(function(errs){
-          st.postErrs = errs; /* erros da rodada atual (rate-limit some no retry; real persiste) */
-          if (n < 5 && errs.length) {
-            var isRate = errs.some(function(m){ return /#?613|#?17\b|#?4\b|rate limit|exceeded the (?:concurrent )?request|calls to this api/i.test(m); });
-            var wait = isRate ? 12000 : 2000;
-            return new Promise(function(r){ setTimeout(r, wait); }).then(function(){ return round(n + 1); });
-          }
-        });
-      });
-    }
-    return round(0).then(function(){
-      return listSets().then(function(sets){
-        /* Conta so os conjuntos EDITAVEIS (exclui os estruturais que a Meta nao deixa mudar). */
-        var writable = sets.filter(function(s){ return !skipIds[s.id]; });
-        st.total = writable.length;
-        st.ok = writable.filter(function(s){ return dayOf(s.end_time) === wantDay; }).length;
-        st.accepted = st.postErrs.length === 0; /* nenhum erro real -> Meta aceitou as escritas */
-        /* Conjuntos editaveis fora da data SEM erro real = STALE (read-back atrasado / teto da campanha), nao erro. */
-        if (st.ok < st.total) {
-          var known = st.postErrs.join(' ');
-          writable.forEach(function(s){
-            var d = dayOf(s.end_time);
-            if (d !== wantDay && known.indexOf(s.name || s.id) < 0) st.stale.push((s.name || s.id) + ': ainda ' + (d || '?'));
+    /* ⚠️ #613 = "1 call por 30s POR OBJETO". RE-POSTAR o mesmo conjunto em <30s dispara o #613 — era o que o
+       retry em rounds fazia. Agora: posta o end_time UMA VEZ só (Batch), espera a propagação e RE-LÊ (GET,
+       que NÃO conta p/ o #613). Sem re-POST. #613 e "Invalid parameter" viram AVISO (não re-tenta): o usuário
+       espera 30s e clica de novo, ou (invalid) a Meta não deixa aquele conjunto mudar a data. */
+    var RATE = /#?613|#?17\b|#?4\b|#?80004|rate limit|exceeded the (?:concurrent )?request|calls to this api|too many calls/i;
+    var SOFT = /invalid parameter|parâmetro inválido|parametro invalido/i;
+    return listSets().then(function(sets) {
+      var writable0 = sets.filter(function(s){ return !skipIds[s.id]; });
+      st.total = writable0.length;
+      if (!writable0.length) { st.ok = 0; st.fails = []; return st; }
+      var pend = writable0.filter(function(s){ return dayOf(s.end_time) !== wantDay; });
+      if (!pend.length) { st.ok = st.total; st.fails = []; return st; } /* já estão na data */
+      return batchEnd(pend).then(function(errs){
+        /* classifica: #613/rate (espere 30s) | invalid/soft (conjunto não edita a data) | erro REAL */
+        st.rate = errs.filter(function(m){ return RATE.test(m); });
+        var softs = errs.filter(function(m){ return !RATE.test(m) && SOFT.test(m); });
+        softs.forEach(function(m){ if (st.unsupported.indexOf(m) < 0) st.unsupported.push(m); });
+        st.postErrs = errs.filter(function(m){ return !RATE.test(m) && !SOFT.test(m); });
+        /* espera a propagação e RE-LÊ (só GET, sem re-POST -> sem #613) p/ contar quantos pegaram */
+        return new Promise(function(r){ setTimeout(r, 3500); }).then(function(){
+          return listSets().then(function(s2){
+            var writable = s2.filter(function(s){ return !skipIds[s.id]; });
+            st.total = writable.length;
+            st.ok = writable.filter(function(s){ return dayOf(s.end_time) === wantDay; }).length;
+            st.accepted = st.postErrs.length === 0 && st.rate.length === 0;
+            if (st.ok < st.total) {
+              var known = st.postErrs.concat(st.rate).concat(st.unsupported).join(' ');
+              writable.forEach(function(s){
+                var d = dayOf(s.end_time);
+                if (d !== wantDay && known.indexOf(s.name || s.id) < 0) st.stale.push((s.name || s.id) + ': ainda ' + (d || '?'));
+              });
+            }
+            st.fails = st.postErrs.concat(st.rate).concat(st.stale);
+            return st;
           });
-        }
-        st.fails = st.postErrs.concat(st.stale); /* compat: lista completa p/ exibir (sem os estruturais) */
-        return st;
+        });
       });
     });
   }
@@ -4037,52 +4055,54 @@ html,body{background:#fbfcfd!important}
     var doSets = function(){ return applyEndToAdsets(camp.id, useTk, endIso, wantDay, function(t){ useTk = t; camp._tk = t; }, camp._adsets).then(function(s){ setSt = s; return s; }); };
     (shorten ? doSets().then(doCamp) : doCamp().then(doSets))
       .then(function(){
-        var confirmed = campRes && campRes.ok;                             /* read-back CONFIRMOU a data nova NA META */
-        var acceptedNoChange = campRes && !campRes.ok && campRes.postOk;    /* Meta aceitou (200) mas MANTEVE a antiga */
-        /* ✅ SÓ diz "Aplicado" quando a Meta REALMENTE mudou (confirmado lendo de volta). Nada de verde otimista. */
-        if (confirmed) {
-          camp.stop_time = endTs; /* agora É verdade: a Meta mudou */
-          /* reflete o novo end_time nos conjuntos editáveis já carregados (display coerente com o gerenciador) */
-          (camp._adsets || []).forEach(function(s){ var stt=(s.effective_status||'').toUpperCase(); if (stt!=='ARCHIVED' && stt!=='DELETED') s.end_time = endIso; });
-          if (btn) { btn.textContent = 'Aplicado!'; btn.style.background = '#1a7f37'; btn.style.borderColor = '#1a7f37'; }
-          if (camp._sugSig) setAppliedRule(camp.id, camp._sugSig, camp._sugAction);
-          var _sigH = fromRule ? camp._sugSig : 'MANUAL';
-          var _actH = fromRule ? camp._sugAction : ('Ajuste manual de termino' + (histDailyNew ? ' (~$' + Math.round(histDailyNew) + '/dia)' : ''));
-          logRuleHist(camp, _sigH, _actH, { dailyOld: histDailyOld > 0 ? histDailyOld : null, dailyNew: histDailyNew, endOld: histEndOld, endNew: dateVal });
-          var setMsg = (setSt && setSt.total) ? (' · ' + setSt.ok + '/' + setSt.total + ' conjuntos') : '';
-          notifyOk('Aplicado em "' + camp.name + '" — CONFIRMADO na Meta',
-            'Término ' + brDay(dateVal) + setMsg + (histDailyNew ? ' · diário ~$' + Math.round(histDailyNew) : ''));
-          if (curTab === 'orc') renderOrc();
-          if (curTab === 'hist') renderHist();
-          renderCBO();
-          setTimeout(function() { var b2 = document.getElementById('csavebtn_'+i); if (b2) { b2.disabled = false; b2.textContent = 'Aplicar'; b2.style.background = ''; b2.style.borderColor = ''; } }, 3000);
-          return;
-        }
-        if (acceptedNoChange) {
-          /* ⚠️ NÃO é sucesso: a Meta aceitou o POST mas, após ~25s relendo, manteve a data antiga. NÃO marca
-             verde, NÃO altera o display, NÃO loga. Fala a verdade + O QUE está travando (não deixa você achar que escalou). */
-          var keptDay = campRes && campRes.campDay ? brDay(campRes.campDay) : 'a antiga';
+        /* ✅ RE-CHECK AUTORITATIVO: depois de TODAS as escritas, lê de novo a campanha + os conjuntos (a ordem e
+           a propagação não enganam mais). SUCESSO REAL = TODOS os conjuntos editáveis na data nova (é o que manda
+           no DELIVERY) E a campanha na data nova. Se tiver conjunto editável e NEM TODOS mudaram -> NÃO APLICOU
+           (erro vermelho claro). 0/N = não aplicou em nenhum = ERRO. */
+        var dayClose2 = function(a, b){ if (!a || !b) return false; if (a === b) return true; var da=new Date(a+'T12:00:00Z'), db=new Date(b+'T12:00:00Z'); return Math.abs(da-db) <= 86400000 + 1000; };
+        return Promise.all([
+          fjRetry(API + '/' + camp.id + '?fields=stop_time&access_token=' + useTk),
+          fjRetry(API + '/' + camp.id + '/adsets?fields=id,name,effective_status,end_time&limit=200&access_token=' + useTk)
+        ]).then(function(res){
+          var campDay = dayOf(res[0] && res[0].stop_time);
+          var campOk = dayClose2(campDay, wantDay);
+          var sets = (res[1] && res[1].data) || [];
+          var editable = sets.filter(function(s){ var stt=(s.effective_status||'').toUpperCase(); return stt!=='ARCHIVED' && stt!=='DELETED'; });
+          var setOk = editable.filter(function(s){ return dayClose2(dayOf(s.end_time), wantDay); }).length;
+          var setTot = editable.length;
+          /* com conjuntos editáveis -> TODOS + campanha. sem conjuntos editáveis (CBO puro) -> só a campanha. */
+          var realOk = setTot > 0 ? (setOk >= setTot && campOk) : campOk;
+          if (realOk) {
+            camp.stop_time = endTs;
+            editable.forEach(function(s){ var m = (camp._adsets||[]).filter(function(x){ return x.id===s.id; })[0]; if (m) m.end_time = endIso; });
+            if (btn) { btn.textContent = 'Aplicado!'; btn.style.background = '#1a7f37'; btn.style.borderColor = '#1a7f37'; }
+            if (camp._sugSig) setAppliedRule(camp.id, camp._sugSig, camp._sugAction);
+            var _sigH = fromRule ? camp._sugSig : 'MANUAL';
+            var _actH = fromRule ? camp._sugAction : ('Ajuste manual de termino' + (histDailyNew ? ' (~$' + Math.round(histDailyNew) + '/dia)' : ''));
+            logRuleHist(camp, _sigH, _actH, { dailyOld: histDailyOld > 0 ? histDailyOld : null, dailyNew: histDailyNew, endOld: histEndOld, endNew: dateVal });
+            var setMsg = setTot > 0 ? (' · ' + setOk + '/' + setTot + ' conjuntos') : '';
+            notifyOk('Aplicado em "' + camp.name + '" — CONFIRMADO na Meta', 'Término ' + brDay(dateVal) + setMsg + (histDailyNew ? ' · diário ~$' + Math.round(histDailyNew) : ''));
+            if (curTab === 'orc') renderOrc();
+            if (curTab === 'hist') renderHist();
+            renderCBO();
+            setTimeout(function() { var b2 = document.getElementById('csavebtn_'+i); if (b2) { b2.disabled = false; b2.textContent = 'Aplicar'; b2.style.background = ''; b2.style.borderColor = ''; } }, 3000);
+            return;
+          }
+          /* ❌ NÃO APLICOU (total ou parcial) -> VERMELHO + motivo claro. Não marca verde, não loga, não muda display. */
+          var rateHit = (setSt && setSt.rate && setSt.rate.length) || /request limit|rate limit|#?17\b|#?613|too many calls|calls to this api/i.test((campRes && campRes.err) || '');
           var blockers = setSt ? (setSt.unsupported || []).concat(setSt.postErrs || []).concat(setSt.stale || []) : [];
-          var setInfo = '';
-          if (setSt && setSt.ok && setSt.total) setInfo += ' (' + setSt.ok + '/' + setSt.total + ' conjuntos mudaram)';
-          var motivo = blockers.length
-            ? ('A Meta NÃO deixou mudar a data de: ' + blockers.slice(0,3).join('; ') + '. Em CBO a campanha fica presa ao conjunto que termina MAIS TARDE — enquanto esse(s) não mudar(em), a data não desce. Tente ATIVAR esse conjunto e aplicar de novo, ou mude a data dele no gerenciador.')
-            : ('Costuma ser a trava de fim de vida da vitalícia. Pra escalar: aumente o ORÇAMENTO total (lápis na coluna Orçamento) ou duplique a campanha.');
-          if (btn) { btn.disabled = false; btn.textContent = 'NÃO mudou'; btn.style.background = '#9a6700'; btn.style.borderColor = '#9a6700'; }
-          setTimeout(function() { if (btn) { btn.textContent = 'Aplicar'; btn.style.background = ''; btn.style.borderColor = ''; } }, 7000);
-          notifyErr('A Meta NÃO mudou o término de "' + camp.name + '"' + setInfo,
-            'A campanha ficou em ' + keptDay + ' (conferi por 25s). ' + motivo + ' NÃO confie que mudou — não mudou.');
+          var tokenBad = /application has been deleted|validating application|access token|session.*expired|OAuth|code 190/i.test(((campRes && campRes.err) || '') + ' ' + blockers.join(' '));
+          var motivo;
+          if (rateHit) motivo = 'A Meta limitou a frequência (#613 = 1 alteração por conjunto a cada 30s). ESPERE ~30 segundos e clique Aplicar DE NOVO — NÃO fique clicando rápido (cada clique reinicia os 30s).';
+          else if (tokenBad) motivo = 'TOKEN INVÁLIDO — gere um novo em ⚙ Tokens e tente de novo.';
+          else if (blockers.length) motivo = 'A Meta não deixou mudar: ' + blockers.slice(0,3).join('; ') + '. Tente ATIVAR esse conjunto, ou mude a data dele no gerenciador.';
+          else if (setTot > 0 && setOk > 0) motivo = 'Só ' + setOk + '/' + setTot + ' conjuntos pegaram a data. Clique Aplicar de novo (espere 30s se repetir).';
+          else motivo = 'A Meta manteve a data antiga (trava de fim de vida da vitalícia, ou propagação). Confira em 1 min; se continuar, aumente o ORÇAMENTO total ou duplique a campanha.';
+          if (btn) { btn.disabled = false; btn.textContent = 'NÃO aplicou'; btn.style.background = '#cf222e'; btn.style.borderColor = '#cf222e'; }
+          setTimeout(function() { if (btn) { btn.textContent = 'Aplicar'; btn.style.background = ''; btn.style.borderColor = ''; } }, 8000);
+          notifyErr('❌ NÃO APLICOU o término de "' + camp.name + '"' + (setTot > 0 ? (' — ' + setOk + '/' + setTot + ' conjuntos') : ''), motivo + ' (NÃO confie que mudou — não mudou.)');
           renderCBO();
-          return;
-        }
-        /* ERRO REAL no stop_time da campanha -> botao vermelho + aviso com o erro exato da Meta. */
-        if (btn) { btn.disabled = false; btn.textContent = 'Erro!'; btn.style.background = '#cf222e'; btn.style.borderColor = '#cf222e'; }
-        setTimeout(function() { if (btn) { btn.textContent = 'Aplicar'; btn.style.background = ''; btn.style.borderColor = ''; } }, 4000);
-        var em = (campRes && campRes.err) || '';
-        var tokenBad = /application has been deleted|validating application|access token|session.*expired|OAuth|code 190/i.test(em);
-        var rateLtd = /request limit|rate limit|#?17\b|#?613|too many calls|calls to this api/i.test(em);
-        notifyErr('Erro ao aplicar data em "' + camp.name + '"',
-          'A Meta recusou mudar o término. ' + em + (rateLtd ? ' (limite momentâneo da conta — espere ~30s e clique de novo)' : ' Clique Aplicar de novo.') + (tokenBad ? ' TOKEN INVÁLIDO: gere um novo em Tokens.' : ''));
+        });
       })
       .catch(function(e) {
         if (btn) { btn.disabled = false; btn.textContent = 'Erro!'; btn.style.background = '#cf222e'; btn.style.borderColor = '#cf222e'; }
