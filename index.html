@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-10-05.1</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-10-05.2</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -1597,13 +1597,8 @@ html,body{background:#fbfcfd!important}
             if (c._acctStatus === 1) keepAcct[c._acctId] = true;
             else if (((c.effective_status||c.status||'').toUpperCase())==='ACTIVE') keepAcct[c._acctId] = true;
           });
-          var filtered = camps.filter(function(c){
-            if (!keepAcct[c._acctId]) return false;
-            /* Conta SEM gasto nos últimos 7d (entrou só por estar ATIVA) -> mostra SÓ campanha ATIVA, p/ não
-               encher a aba de campanhas PAUSADAS de contas paradas. Conta COM gasto 7d mostra tudo (ativa+pausada). */
-            if ((c._acctSp7d || 0) <= 0 && (c.effective_status||c.status||'').toUpperCase() !== 'ACTIVE') return false;
-            return true;
-          });
+          /* Sem restrição de gasto 7d (pedido do usuário 05/10): mostra TODAS as CBO das contas incluídas. */
+          var filtered = camps.filter(function(c){ return keepAcct[c._acctId]; });
           /* 🔑 DEDUP por ID da campanha: evita GASTO DUPLICADO quando a paginação (fjPaged) ou tokens com acesso
              à mesma conta trazem a MESMA campanha 2x (linha repetida + total dobrado). Fica só a 1ª ocorrência. */
           var _seenCamp = {}; filtered = filtered.filter(function(c){ if (!c || !c.id) return false; if (_seenCamp[c.id]) return false; _seenCamp[c.id] = true; return true; });
