@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-10-02.6</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-10-05.1</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -1583,9 +1583,9 @@ html,body{background:#fbfcfd!important}
       /* SO contas com GASTO nos ultimos 7 dias (gasto 0 nao entra) — dash muito mais rapido e sem rate limit. */
       var accounts = Object.values(map).filter(function(a){
         var sp = 0; try { sp = (a.insights && a.insights.data && a.insights.data[0]) ? (parseFloat(a.insights.data[0].spend) || 0) : 0; } catch(e){}
-        a._sp7d = sp; return sp > 0 && acctAllowed(a); /* so contas c/ gasto 7d E dentro do filtro (mais rapido) */
+        a._sp7d = sp; return (sp > 0 || a.account_status === 1) && acctAllowed(a); /* conta c/ gasto 7d OU ATIVA (p/ pegar campanha ativa de conta nova/parada que não gastou ainda) */
       });
-      if (!accounts.length) { document.getElementById('cboTbody').innerHTML = '<tr><td colspan="26" class="ld" style="color:#cf222e">Nenhuma conta com gasto nos ultimos 7 dias.</td></tr>'; if (spinEl) spinEl.style.display='none'; return; }
+      if (!accounts.length) { document.getElementById('cboTbody').innerHTML = '<tr><td colspan="26" class="ld" style="color:#cf222e">Nenhuma conta ativa ou com gasto nos ultimos 7 dias.</td></tr>'; if (spinEl) spinEl.style.display='none'; return; }
       document.getElementById('cboTbody').innerHTML = '<tr><td colspan="26" class="ld"><span class="spin"></span>Buscando campanhas CBO em '+accounts.length+' contas...</td></tr>';
       var camps = [];
       var idx = 0;
@@ -1597,7 +1597,13 @@ html,body{background:#fbfcfd!important}
             if (c._acctStatus === 1) keepAcct[c._acctId] = true;
             else if (((c.effective_status||c.status||'').toUpperCase())==='ACTIVE') keepAcct[c._acctId] = true;
           });
-          var filtered = camps.filter(function(c){ return keepAcct[c._acctId]; });
+          var filtered = camps.filter(function(c){
+            if (!keepAcct[c._acctId]) return false;
+            /* Conta SEM gasto nos últimos 7d (entrou só por estar ATIVA) -> mostra SÓ campanha ATIVA, p/ não
+               encher a aba de campanhas PAUSADAS de contas paradas. Conta COM gasto 7d mostra tudo (ativa+pausada). */
+            if ((c._acctSp7d || 0) <= 0 && (c.effective_status||c.status||'').toUpperCase() !== 'ACTIVE') return false;
+            return true;
+          });
           /* 🔑 DEDUP por ID da campanha: evita GASTO DUPLICADO quando a paginação (fjPaged) ou tokens com acesso
              à mesma conta trazem a MESMA campanha 2x (linha repetida + total dobrado). Fica só a 1ª ocorrência. */
           var _seenCamp = {}; filtered = filtered.filter(function(c){ if (!c || !c.id) return false; if (_seenCamp[c.id]) return false; _seenCamp[c.id] = true; return true; });
@@ -1622,7 +1628,7 @@ html,body{background:#fbfcfd!important}
               var nameOk = ISOLATED ? (nu.indexOf('SALE') >= 0) : (nu.indexOf('CBO') >= 0 || nu.indexOf('TESTE') >= 0);
               return !!c.name && nameOk && nu.indexOf('SUBSTITUIDA') < 0 && nu.indexOf('MORTA') < 0 && (!!c.lifetime_budget || !!c.daily_budget);
             }).forEach(function(c) {
-              c._accountName = acc.name; c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; c._acctOffset = acc.timezone_offset_hours_utc; camps.push(c);
+              c._accountName = acc.name; c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; c._acctOffset = acc.timezone_offset_hours_utc; c._acctSp7d = acc._sp7d || 0; camps.push(c);
             });
           }).catch(function(){});
         })).then(nextBatch);
@@ -4043,30 +4049,39 @@ html,body{background:#fbfcfd!important}
 
     var useTk = camp._tk;
     var brDay = function(d){ return d ? String(d).split('-').reverse().join('/') : '?'; };
-    /* ===== ✅ TÉRMINO SÓ PELOS CONJUNTOS DE ANÚNCIOS (pedido do usuário 02/10): NÃO toca mais no stop_time da
-       CAMPANHA (era a fonte de #613/clamp/falso verde). Muda o end_time de TODOS os conjuntos editáveis
-       (ATIVO + PAUSADO), UMA escrita por conjunto (sem re-post = sem #613). O fim efetivo da campanha segue o
-       conjunto que termina mais tarde. SUCESSO = TODOS os conjuntos editáveis na data nova (re-lido da Meta). */
-    var setSt = null;
+    /* ===== TÉRMINO: em CBO o end_time do CONJUNTO fica PRESO ao stop_time da CAMPANHA (adset.end <= campanha.stop
+       <= maior adset.end). Então pra o término MUDAR DE VERDADE muda-se os DOIS, na ORDEM certa, com 1 escrita
+       por objeto (sem re-post = sem #613): ENCURTAR -> conjuntos primeiro (baixa o teto) depois campanha;
+       ESTENDER -> campanha primeiro (levanta o teto) depois conjuntos. SUCESSO = conjuntos E campanha na data nova. */
+    var setSt = null, campErr = null;
     var dayClose2 = function(a, b){ if (!a || !b) return false; if (a === b) return true; var da=new Date(a+'T12:00:00Z'), db=new Date(b+'T12:00:00Z'); return Math.abs(da-db) <= 86400000 + 1000; };
-    applyEndToAdsets(camp.id, useTk, endIso, wantDay, function(t){ useTk = t; camp._tk = t; }, camp._adsets)
-      .then(function(s){ setSt = s;
-        /* RE-CHECK autoritativo SÓ dos conjuntos: relê o end_time de todos (ordem/propagação não enganam). */
-        return fjRetry(API + '/' + camp.id + '/adsets?fields=id,name,effective_status,end_time&limit=200&access_token=' + useTk).then(function(v){
+    var oldDay = camp.stop_time ? dayOf(camp.stop_time) : null;
+    var shorten = !!(oldDay && wantDay < oldDay); /* data pra trás = encurtar */
+    var doSets = function(){ return applyEndToAdsets(camp.id, useTk, endIso, wantDay, function(t){ useTk = t; camp._tk = t; }, camp._adsets).then(function(s){ setSt = s; }); };
+    var doCamp = function(){ return postForm(camp.id, useTk, { stop_time: String(endTs) }).then(function(){ campErr = null; }).catch(function(e){ campErr = (e && e.message) ? e.message : String(e); }); };
+    (shorten ? doSets().then(doCamp) : doCamp().then(doSets))
+      .then(function(){
+        /* RE-CHECK autoritativo: relê CAMPANHA + conjuntos (ordem/propagação não enganam). */
+        return new Promise(function(r){ setTimeout(r, 1500); }).then(function(){ return Promise.all([
+          fjRetry(API + '/' + camp.id + '?fields=stop_time&access_token=' + useTk),
+          fjRetry(API + '/' + camp.id + '/adsets?fields=id,name,effective_status,end_time&limit=200&access_token=' + useTk)
+        ]); }).then(function(resArr){
+          var campDay = dayOf(resArr[0] && resArr[0].stop_time), campOk = dayClose2(campDay, wantDay);
+          var v = resArr[1];
           var sets = (v && v.data) || [];
           var editable = sets.filter(function(st2){ var stt=(st2.effective_status||'').toUpperCase(); return stt!=='ARCHIVED' && stt!=='DELETED'; });
           var setOk = editable.filter(function(st2){ return dayClose2(dayOf(st2.end_time), wantDay); }).length;
           var setTot = editable.length;
-          var realOk = setTot > 0 && setOk >= setTot; /* TODOS os conjuntos editáveis na data nova */
+          var realOk = (setTot === 0 || setOk >= setTot) && campOk; /* conjuntos todos + campanha na data nova */
           if (realOk) {
-            camp.stop_time = endTs; /* fim efetivo segue os conjuntos -> reflete no display */
+            camp.stop_time = endTs;
             editable.forEach(function(st2){ var m = (camp._adsets||[]).filter(function(x){ return x.id===st2.id; })[0]; if (m) m.end_time = endIso; });
             if (btn) { btn.textContent = 'Aplicado!'; btn.style.background = '#1a7f37'; btn.style.borderColor = '#1a7f37'; }
             if (camp._sugSig) setAppliedRule(camp.id, camp._sugSig, camp._sugAction);
             var _sigH = fromRule ? camp._sugSig : 'MANUAL';
             var _actH = fromRule ? camp._sugAction : ('Ajuste manual de termino (conjuntos)' + (histDailyNew ? ' (~$' + Math.round(histDailyNew) + '/dia)' : ''));
             logRuleHist(camp, _sigH, _actH, { dailyOld: histDailyOld > 0 ? histDailyOld : null, dailyNew: histDailyNew, endOld: histEndOld, endNew: dateVal });
-            notifyOk('Aplicado em "' + camp.name + '" — CONFIRMADO (conjuntos)', 'Término ' + brDay(dateVal) + ' · ' + setOk + '/' + setTot + ' conjuntos' + (histDailyNew ? ' · diário ~$' + Math.round(histDailyNew) : ''));
+            notifyOk('Aplicado em "' + camp.name + '" — CONFIRMADO na Meta', 'Término ' + brDay(dateVal) + ' (campanha + ' + setOk + '/' + setTot + ' conjuntos)' + (histDailyNew ? ' · diário ~$' + Math.round(histDailyNew) : ''));
             if (curTab === 'orc') renderOrc();
             if (curTab === 'hist') renderHist();
             renderCBO();
@@ -4074,12 +4089,15 @@ html,body{background:#fbfcfd!important}
             return;
           }
           /* ❌ NÃO APLICOU (total ou parcial) -> VERMELHO + motivo claro. Não marca verde, não loga, não muda display. */
-          var rateHit = setSt && setSt.rate && setSt.rate.length;
+          var allErrTxt = ((setSt ? (setSt.unsupported || []).concat(setSt.postErrs || []).concat(setSt.stale || []) : []).join(' ')) + ' ' + (campErr || '');
+          var rateHit = (setSt && setSt.rate && setSt.rate.length) || /request limit|rate limit|#?17\b|#?613|too many calls|calls to this api/i.test(allErrTxt);
           var blockers = setSt ? (setSt.unsupported || []).concat(setSt.postErrs || []).concat(setSt.stale || []) : [];
-          var tokenBad = /application has been deleted|validating application|access token|session.*expired|OAuth|code 190/i.test(blockers.join(' '));
+          var tokenBad = /application has been deleted|validating application|access token|session.*expired|OAuth|code 190/i.test(allErrTxt);
+          var setsAllOk = setTot === 0 || setOk >= setTot;
           var motivo;
-          if (rateHit) motivo = 'A Meta limitou a frequência (#613 = 1 alteração por conjunto a cada 30s). ESPERE ~30 segundos e clique Aplicar DE NOVO — NÃO fique clicando rápido (cada clique reinicia os 30s).';
+          if (rateHit) motivo = 'A Meta limitou a frequência (#613 = 1 alteração por objeto a cada 30s). ESPERE ~30 segundos e clique Aplicar DE NOVO — NÃO fique clicando rápido (cada clique reinicia os 30s).';
           else if (tokenBad) motivo = 'TOKEN INVÁLIDO — gere um novo em ⚙ Tokens e tente de novo.';
+          else if (setsAllOk && !campOk) motivo = 'Os conjuntos já estão na data nova, falta só a CAMPANHA confirmar (ao ESTENDER, a Meta exige fazer em 2 passos). ESPERE ~30s e clique Aplicar DE NOVO — na 2ª vez a campanha pega.';
           else if (blockers.length) motivo = 'A Meta não deixou mudar: ' + blockers.slice(0,3).join('; ') + '. Tente ATIVAR esse conjunto, ou mude a data dele no gerenciador.';
           else if (setTot > 0 && setOk > 0) motivo = 'Só ' + setOk + '/' + setTot + ' conjuntos pegaram a data. Clique Aplicar de novo (espere 30s se repetir).';
           else if (setTot === 0) motivo = 'Não achei conjunto editável (ou a Meta cortou a leitura). Recarregue as campanhas e tente de novo.';
