@@ -162,7 +162,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-10-05.2</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-10-08.1</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -527,7 +527,7 @@ html,body{background:#fbfcfd!important}
   function saveRtPType(v) { try { if (v) localStorage.setItem('rt_ptype', v); else localStorage.removeItem('rt_ptype'); } catch(e) {} }
   function getRtICType() { try { return localStorage.getItem('rt_ictype') || '2'; } catch(e) { return '2'; } }
   function saveRtICType(v) { try { if (v) localStorage.setItem('rt_ictype', v); else localStorage.removeItem('rt_ictype'); } catch(e) {} }
-  function hasConv() { return !!(getRtTk() || getUtmTk()); }
+  function hasConv() { return ISOLATED ? true : !!(getRtTk() || getUtmTk()); } /* Dash 2: vendas vêm do postback (sem token) */
   /* FATURAMENTO = RECEITA REAL da RedTrack (coluna Revenue, USD direto) — as comissões VARIAM por venda
      ($120, $250, $240...), então NÃO multiplica mais por comissão fixa (pedido do usuário 25/09). UTMify
      (instância isolada) = valor real das ordens. Fallback: se a RedTrack não mandou revenue mas há vendas,
@@ -1246,13 +1246,28 @@ html,body{background:#fbfcfd!important}
   }
 
   /* ── Conversoes: prioriza RedTrack, cai para Utmify ── */
+  /* URL do worker p/ LER o postback de vendas — vale MESMO no isolado (Dash 2 lê /pbsales, sem controlar o robô). */
+  function getPbUrl() { try { var v = (localStorage.getItem('wk_url') || '').trim(); return (v || WK_URL_DEFAULT).replace(/\/+$/,''); } catch(e){ return WK_URL_DEFAULT; } }
+  /* DASH 2 (isolado): VENDAS da JVZoo + Cartpanda via postback S2S (worker /pbsales). SUBSTITUI UTMify/RedTrack.
+     Casa por CAMPAIGN_ID (o receptor extraiu o ID do utm_campaign "NOME|ID"). Faturamento = valor real das vendas. */
+  function fetchPostbackSales(camps) {
+    camps.forEach(function(c){ c._conv = null; });
+    var u = getPbUrl(); if (!u) return Promise.resolve();
+    var p = periodDates(), since, until;
+    if (p) { since = p.since; until = p.until; } else { var _t = new Date(Date.now() - 3*3600000); until = _t.toISOString().slice(0,10); var _s = new Date(Date.now() - 3*3600000 - 365*86400000); since = _s.toISOString().slice(0,10); }
+    return fetch(u + '/pbsales?since=' + since + '&until=' + until, { headers: { 'Accept':'application/json' } })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        var by = (d && d.byCamp) || {};
+        camps.forEach(function(c){ var v = by[String(c.id)]; if (v && (v.sales || v.revenue)) c._conv = { sales: v.sales||0, ic: 0, revenue: v.revenue||0, src: 'pb' }; });
+      }).catch(function(){});
+  }
   function fetchConversions(camps) {
     camps.forEach(function(c){ c._conv = null; });
-    /* FONTE DE VENDAS por INSTANCIA: dash principal -> RedTrack (faturamento = coluna Revenue REAL); instancia
-       isolada -> UTMify (faturamento = valor real das ordens). O outro token, se existir, e so fallback. */
+    /* FONTE DE VENDAS por INSTANCIA: dash principal -> RedTrack (faturamento = coluna Revenue REAL); DASH 2
+       (isolado) -> POSTBACK JVZoo+Cartpanda (substitui UTMify/RedTrack, pedido 08/10). */
     if (ISOLATED) {
-      if (getUtmTk()) return fetchUtmify(camps).catch(function(){ return getRtTk() ? fetchRedTrack(camps) : null; });
-      if (getRtTk()) return fetchRedTrack(camps);
+      return fetchPostbackSales(camps);
     } else {
       if (getRtTk()) return fetchRedTrack(camps).catch(function(){ return getUtmTk() ? fetchUtmify(camps) : null; });
       if (getUtmTk()) return fetchUtmify(camps);
