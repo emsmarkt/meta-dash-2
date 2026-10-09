@@ -167,7 +167,7 @@ html,body{background:#fbfcfd!important}
 <div id="mdb">
   <div id="alertBox" class="alert-box" style="display:none"></div>
   <div class="hdr">
-    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-10-08.2</span></h1>
+    <h1><span class="dot"></span>Meta Ads &mdash; Painel <span id="appVer" style="font-size:11px;color:#656d76;font-weight:400;background:#eef1f5;border:1px solid #e4e8ee;border-radius:10px;padding:1px 8px;margin-left:4px" title="Versão do painel — se estiver diferente da que o Emerson passou, dê Ctrl+Shift+R">v2026-10-08.3</span></h1>
     <div class="hdr-r">
       <div class="tabs">
         <button class="tab-btn on" data-tab="contas">Contas</button>
@@ -3126,24 +3126,53 @@ html,body{background:#fbfcfd!important}
     var _pd = periodDates(), rangeParam;
     if (_pd) rangeParam = 'time_range=' + encodeURIComponent(JSON.stringify({ since: _pd.since, until: _pd.until }));
     else { var sD = new Date(); sD.setMonth(sD.getMonth()-36); rangeParam = 'time_range=' + encodeURIComponent(JSON.stringify({ since: sD.toISOString().slice(0,10), until: new Date().toISOString().slice(0,10) })); }
+    /* IC (InitiateCheckout) vem do PRÓPRIO Meta (actions) — postback não manda IC. */
+    var icFields = ',actions';
     var url = (mode === 'country')
-      ? API + '/' + camp.id + '/insights?breakdowns=country&fields=spend,impressions,clicks,inline_link_clicks,cpc,ctr&' + rangeParam + '&limit=200&access_token=' + tk
-      : API + '/' + camp.id + '/insights?level=ad&fields=ad_id,ad_name,spend,impressions,clicks,inline_link_clicks,cpc,ctr&' + rangeParam + '&limit=100&access_token=' + tk;
-    fjRetry(url).then(function(d){
+      ? API + '/' + camp.id + '/insights?breakdowns=country&fields=spend,impressions,clicks,inline_link_clicks,cpc,ctr' + icFields + '&' + rangeParam + '&limit=200&access_token=' + tk
+      : API + '/' + camp.id + '/insights?level=ad&fields=ad_id,ad_name,spend,impressions,clicks,inline_link_clicks,cpc,ctr' + icFields + '&' + rangeParam + '&limit=100&access_token=' + tk;
+    var getIC = function(acts){ if (!Array.isArray(acts)) return 0; var t=['omni_initiated_checkout','initiate_checkout','offsite_conversion.fb_pixel_initiate_checkout']; for (var ti=0;ti<t.length;ti++){ for (var ai=0;ai<acts.length;ai++){ if (acts[ai] && acts[ai].action_type===t[ti]) return parseInt(acts[ai].value)||0; } } return 0; };
+    /* VENDAS/FATURAMENTO por AD/país vêm do POSTBACK; IC (clique no botão) vem da VTURB. Só no Dash 2 isolado. */
+    var pbP = Promise.resolve({ byAd:{}, byCountry:{} });
+    var vtP = Promise.resolve({ byAd:{} });
+    if (ISOLATED) {
+      var pu = getPbUrl();
+      if (pu) {
+        var _pbd = periodDates(), pSince, pUntil;
+        if (_pbd) { pSince = _pbd.since; pUntil = _pbd.until; }
+        else { var _pt = new Date(Date.now()-3*3600000); pUntil = _pt.toISOString().slice(0,10); pSince = new Date(Date.now()-3*3600000-365*86400000).toISOString().slice(0,10); }
+        pbP = fetch(pu + '/pbbreak?camp=' + encodeURIComponent(camp.id) + '&since=' + pSince + '&until=' + pUntil, { headers:{'Accept':'application/json'} })
+          .then(function(r){ return r.json(); }).catch(function(){ return { byAd:{}, byCountry:{} }; });
+        if (mode !== 'country') vtP = fetch(pu + '/vturbic?since=' + pSince + '&until=' + pUntil, { headers:{'Accept':'application/json'} })
+          .then(function(r){ return r.json(); }).catch(function(){ return { byAd:{} }; });
+      }
+    }
+    Promise.all([ fjRetry(url), pbP, vtP ]).then(function(res){
+      var d = res[0] || {}, pb = res[1] || {}, vt = (res[2] && res[2].byAd) || {};
       if (d && d.error) { box.innerHTML = '<span style="color:#cf222e">Erro da Meta: ' + (d.error.message||'') + '</span>'; return; }
       var rows = (d && d.data) || [];
       if (!rows.length) { box.innerHTML = '<span style="color:#57606a">Sem dados no período.</span>'; return; }
+      var pbMap = (mode === 'country') ? (pb.byCountry || {}) : (pb.byAd || {});
       rows.sort(function(a,b){ return (parseFloat(b.spend)||0) - (parseFloat(a.spend)||0); });
+      var vendHead = ISOLATED ? '<th>Vendas</th><th>Fat.</th>' : '';
       var head = (mode === 'country')
-        ? '<tr><th style="text-align:left">País</th><th>Gasto</th><th>Impressões</th><th>Cliques</th><th>Cliques no link</th><th>CPC</th><th>CTR</th></tr>'
-        : '<tr><th style="text-align:left">Anúncio</th><th>ID do anúncio</th><th>Gasto</th><th>Impressões</th><th>Cliques</th><th>Cliques no link</th><th>CPC</th><th>CTR</th></tr>';
+        ? '<tr><th style="text-align:left">País</th><th>Gasto</th><th>Impressões</th><th>Cliques</th>'+vendHead+'<th>IC</th><th>CPC</th><th>CTR</th></tr>'
+        : '<tr><th style="text-align:left">Anúncio</th><th>ID do anúncio</th><th>Gasto</th><th>Impressões</th><th>Cliques</th>'+vendHead+'<th>IC</th><th>CPC</th><th>CTR</th></tr>';
       var body = rows.map(function(r){
-        var spend = parseFloat(r.spend)||0, imp = parseInt(r.impressions)||0, clk = parseInt(r.clicks)||0, lclk = parseInt(r.inline_link_clicks)||0, cpc = parseFloat(r.cpc)||0, ctr = parseFloat(r.ctr)||0;
-        var common = '<td>'+fmtUSD(spend)+'</td><td>'+imp.toLocaleString('pt-BR')+'</td><td>'+clk.toLocaleString('pt-BR')+'</td><td>'+lclk.toLocaleString('pt-BR')+'</td><td>'+fmtUSD(cpc)+'</td><td>'+ctr.toFixed(2).replace('.',',')+'%</td>';
-        if (mode === 'country') return '<tr><td style="text-align:left;font-weight:600">'+(r.country||'?')+'</td>'+common+'</tr>';
-        return '<tr><td style="text-align:left;max-width:240px;white-space:normal">'+esc(r.ad_name||'(sem nome)')+'</td><td style="font-size:10px;color:#57606a">'+(r.ad_id||'')+'</td>'+common+'</tr>';
+        var spend = parseFloat(r.spend)||0, imp = parseInt(r.impressions)||0, clk = parseInt(r.clicks)||0, cpc = parseFloat(r.cpc)||0, ctr = parseFloat(r.ctr)||0;
+        var keyv = (mode === 'country') ? String(r.country||'').toUpperCase() : String(r.ad_id||'');
+        /* IC = clique no botão da VTurb por AD (Dash 2); se não houver, cai no IC do Meta (actions). */
+        var vtAd = (mode !== 'country') ? vt[keyv] : null;
+        var ic = (vtAd && vtAd.clicks != null) ? vtAd.clicks : getIC(r.actions);
+        var pv = pbMap[keyv] || { sales:0, revenue:0 };
+        var vendCell = ISOLATED ? ('<td style="font-weight:600'+(pv.sales>0?';color:#1a7f37':'')+'">'+(pv.sales||0)+'</td><td'+(pv.revenue>0?' style="color:#1a7f37"':'')+'>'+(pv.revenue>0?fmtUSD(pv.revenue):'—')+'</td>') : '';
+        var tail = vendCell + '<td'+(ic>0?' style="font-weight:600"':'')+'>'+ic.toLocaleString('pt-BR')+'</td><td>'+fmtUSD(cpc)+'</td><td>'+ctr.toFixed(2).replace('.',',')+'%</td>';
+        var pre = '<td>'+fmtUSD(spend)+'</td><td>'+imp.toLocaleString('pt-BR')+'</td><td>'+clk.toLocaleString('pt-BR')+'</td>';
+        if (mode === 'country') return '<tr><td style="text-align:left;font-weight:600">'+(r.country||'?')+'</td>'+pre+tail+'</tr>';
+        return '<tr><td style="text-align:left;max-width:220px;white-space:normal">'+esc(r.ad_name||'(sem nome)')+'</td><td style="font-size:10px;color:#57606a">'+(r.ad_id||'')+'</td>'+pre+tail+'</tr>';
       }).join('');
-      box.innerHTML = '<table class="det-tbl"><thead>'+head+'</thead><tbody>'+body+'</tbody></table>';
+      box.innerHTML = '<table class="det-tbl"><thead>'+head+'</thead><tbody>'+body+'</tbody></table>'
+        + (ISOLATED ? '<div style="font-size:10px;color:#57606a;margin-top:4px">Vendas/Fat. = postback (JVZoo+Cartpanda) · IC = clique no botão (VTurb) por AD; por país o IC vem do Meta. Vendas/AD histórico dependem do re-envio com utm_content.</div>' : '');
     }).catch(function(e){ box.innerHTML = '<span style="color:#cf222e">Erro: ' + ((e&&e.message)||e) + '</span>'; });
   }
   function openCboDetail(i) {
